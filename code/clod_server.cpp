@@ -72,6 +72,66 @@ static bool32 ReadClaudeSession(DWORD Pid, std::string& Id, std::string& Cwd)
     return true;
 }
 
+// One tab's answer from a process scan: the claude running somewhere under its cmd, if any.
+struct claude_find
+{
+    DWORD CmdPid;
+    DWORD Pid;       // 0 = none
+    std::string Id;
+    std::string Cwd;
+};
+
+// A process scan handed to its own thread: CmdPids in, Finds out, then Done and the loop's Wake.
+struct claude_scan
+{
+    std::vector<DWORD> CmdPids;
+    std::vector<claude_find> Finds;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+// Claude Code writes <ClaudeConfigDir>\sessions\<pid>.json for each running instance. A tab is a
+// claude tab while one of those pids lives somewhere under its cmd; the file names the session,
+// so a claude typed in a shell (or switched with /resume) is tracked too. Also keeps the tabs'
+// console hosts (ConPTY starts them as our children) and claudes above normal priority, like us.
+static DWORD WINAPI ClaudeScanThread(void* Param)
+{
+    claude_scan* S = (claude_scan*)Param;
+    std::vector<PROCESSENTRY32W> Procs = ListProcesses();
+    for(const PROCESSENTRY32W& P : Procs)
+    {
+        if(P.th32ParentProcessID != GetCurrentProcessId() || _wcsicmp(P.szExeFile, L"conhost.exe") != 0) { continue; }
+        HANDLE Host = OpenProcess(PROCESS_SET_INFORMATION, FALSE, P.th32ProcessID);
+        if(Host) { RaiseForTyping(Host); CloseHandle(Host); }
+    }
+    for(DWORD CmdPid : S->CmdPids)
+    {
+        std::vector<DWORD> Tree = {CmdPid};
+        for(size_t K = 0; K < Tree.size() && Tree.size() < 256; ++K)
+        {
+            for(const PROCESSENTRY32W& P : Procs)
+            {
+                if(P.th32ParentProcessID == Tree[K] && P.th32ProcessID != Tree[K]) { Tree.push_back(P.th32ProcessID); }
+            }
+        }
+        claude_find F = {};
+        F.CmdPid = CmdPid;
+        for(size_t K = 1; K < Tree.size() && !F.Pid; ++K)
+        {
+            if(ReadClaudeSession(Tree[K], F.Id, F.Cwd)) { F.Pid = Tree[K]; }
+        }
+        if(F.Pid)
+        {
+            HANDLE Claude = OpenProcess(PROCESS_SET_INFORMATION, FALSE, F.Pid);
+            if(Claude) { RaiseForTyping(Claude); CloseHandle(Claude); }
+        }
+        S->Finds.push_back(F);
+    }
+    InterlockedExchange(&S->Done, 1);
+    SetEvent(S->Wake);
+    return 0;
+}
+
 // Where a tab's recent output is kept across server restarts: %LOCALAPPDATA%\clod\history\<id>.txt.
 static std::wstring HistoryPath(const std::string& Id)
 {
@@ -424,8 +484,11 @@ static int ServerMain()
     Limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     SetInformationJobObject(Job, JobObjectExtendedLimitInformation, &Limits, sizeof(Limits));
 
+    RaiseForTyping(GetCurrentProcess());
     HANDLE Wake = CreateEventW(0, FALSE, FALSE, 0);
     HANDLE ConnectEvent = CreateEventW(0, TRUE, FALSE, 0);
+    // Wakes the loop exactly when a held-back frame may go out (plain wait timeouts round up to ~16 ms).
+    HANDLE FrameTimer = CreateWaitableTimerExW(0, 0, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     OVERLAPPED ConnectOv = {};
     StartListening(Listen, ConnectOv, ConnectEvent);
     static ipc_conn Client = {};
@@ -574,11 +637,12 @@ static int ServerMain()
     bool32 ForceFull = true;
     bool32 Dirty = true;
     u64 StartMs = GetTickCount64();
-    u64 LastFrameMs = 0;
+    u64 LastFrameUs = 0;        // last frame that carried changes (QpcUs)
     u64 ResizeAtMs = 0;         // pending child resize, applied once the window settles
     u64 SyncSinceMs = 0;        // when the active child began a synchronized update
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
     u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
+    claude_scan* Scan = 0;      // a look under way on its own thread
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
     std::string OuterTitle;
     std::vector<u32> OuterWide;  // sorted codepoints the attached console draws 2 cells wide where CharWidth says 1
@@ -593,8 +657,8 @@ static int ServerMain()
 
     while(!App.Quit)
     {
-        HANDLE Waits[3] = {Wake, ConnectEvent, Client.ReadEvent};
-        DWORD WaitCount = Client.Pipe ? 3 : 2;
+        HANDLE Waits[4] = {Wake, ConnectEvent, FrameTimer, Client.ReadEvent};
+        DWORD WaitCount = Client.Pipe ? 4 : 3;
         DWORD Timeout = (Dirty || ResizeAtMs) ? 8 : 250;
         MsgWaitForMultipleObjects(WaitCount, Waits, FALSE, Timeout, QS_ALLINPUT);
         u64 NowMs = GetTickCount64();
@@ -716,6 +780,7 @@ static int ServerMain()
                 }
                 else if(Type == MSG_INPUT && Attached)
                 {
+                    LatencyMark("server_in");
                     InBytes += Payload;
                 }
                 else if(Type == MSG_RESIZE && Payload.size() >= 8)
@@ -754,7 +819,7 @@ static int ServerMain()
         {
             switch(C.Kind)
             {
-                case CMD_WRITE: PtyWrite(C.Tab->Pty, C.Bytes); break;
+                case CMD_WRITE: PtyWrite(C.Tab->Pty, C.Bytes); LatencyMark("server_write"); break;
                 case CMD_OPEN:
                 {
                     OpenTab(App, false, C.SessionId, std::string(), C.Cwd, C.Project, C.Title, Job, Wake, NowMs);
@@ -926,37 +991,22 @@ static int ServerMain()
         }
         for(tab* T : Ended) { CloseTab(App, T); }
 
-        // --- which tabs are running claude ---
-        // Claude Code writes ~/.claude/sessions/<pid>.json for each running instance. A tab is a
-        // claude tab while one of those pids lives somewhere under its cmd; the file names the
-        // session, so a claude typed in a shell (or switched with /resume) is tracked too.
-        if(!App.Tabs.empty() && NowMs - ClaudeScanMs >= 1000)
+        // --- which tabs are running claude (ClaudeScanThread) ---
+        // A snapshot of every process takes tens of milliseconds, so it runs on its own thread and
+        // the loop (and typing) never waits for it; its answer is applied once it's in.
+        if(Scan && Scan->Done)
         {
-            ClaudeScanMs = NowMs;
-            std::vector<PROCESSENTRY32W> Procs = ListProcesses();
             for(tab* T : App.Tabs)
             {
                 if(!T->Pty || T->Exited) { continue; }
-                std::vector<DWORD> Tree = {GetProcessId(T->Pty->Process)};
-                for(size_t K = 0; K < Tree.size() && Tree.size() < 256; ++K)
+                const claude_find* Find = 0;
+                for(const claude_find& F : Scan->Finds) { if(F.CmdPid == GetProcessId(T->Pty->Process)) { Find = &F; } }
+                if(!Find) { continue; } // opened after the scan started
+                if(Find->Pid)
                 {
-                    for(const PROCESSENTRY32W& P : Procs)
-                    {
-                        if(P.th32ParentProcessID == Tree[K] && P.th32ProcessID != Tree[K]) { Tree.push_back(P.th32ProcessID); }
-                    }
-                }
-                u32 Pid = 0;
-                std::string Id;
-                std::string Cwd;
-                for(size_t K = 1; K < Tree.size() && !Pid; ++K)
-                {
-                    if(ReadClaudeSession(Tree[K], Id, Cwd)) { Pid = Tree[K]; }
-                }
-                if(Pid)
-                {
-                    if(Id != T->SessionId) { T->SessionId = Id; T->Title.clear(); Dirty = true; }
-                    if(!Cwd.empty() && Cwd != T->Cwd) { T->Cwd = Cwd; T->Project = ProjectName(Cwd); Dirty = true; }
-                    T->ClaudePid = Pid;
+                    if(Find->Id != T->SessionId) { T->SessionId = Find->Id; T->Title.clear(); Dirty = true; }
+                    if(!Find->Cwd.empty() && Find->Cwd != T->Cwd) { T->Cwd = Find->Cwd; T->Project = ProjectName(Find->Cwd); Dirty = true; }
+                    T->ClaudePid = Find->Pid;
                     T->LaunchedAtMs = 0;
                 }
                 else if(T->ClaudePid || (T->LaunchedAtMs && NowMs - T->LaunchedAtMs > 30000))
@@ -970,6 +1020,18 @@ static int ServerMain()
                     Dirty = true;
                 }
             }
+            delete Scan;
+            Scan = 0;
+        }
+        if(!Scan && !App.Tabs.empty() && NowMs - ClaudeScanMs >= 1000)
+        {
+            ClaudeScanMs = NowMs;
+            Scan = new claude_scan();
+            Scan->Wake = Wake;
+            for(tab* T : App.Tabs) { if(T->Pty && !T->Exited) { Scan->CmdPids.push_back(GetProcessId(T->Pty->Process)); } }
+            HANDLE Thread = CreateThread(0, 0, ClaudeScanThread, Scan, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete Scan; Scan = 0; }
         }
         if(Attached && !ToClient.empty() && !IpcSendString(Client, MSG_OUTPUT, ToClient)) { IpcClose(Client); Attached = false; }
 
@@ -1029,7 +1091,17 @@ static int ServerMain()
         // --- present to the attached window ---
         tab* Active = ActiveTab(App);
         bool32 HoldForSync = Active && Active->Term.SyncOutput && NowMs - SyncSinceMs < 100;
-        if(Attached && Dirty && !HoldForSync && NowMs - LastFrameMs >= 8)
+        // At most one frame per 8 ms (a flood of output), but a frame after a quiet spell (an echo)
+        // goes out at once; frames that changed nothing don't count.
+        u64 NowUs = QpcUs();
+        bool32 FrameDue = NowUs - LastFrameUs >= 8000;
+        if(Attached && Dirty && !HoldForSync && !FrameDue)
+        {
+            LARGE_INTEGER Due = {};
+            Due.QuadPart = -(s64)(8000 - (NowUs - LastFrameUs)) * 10; // relative, in 100 ns
+            SetWaitableTimer(FrameTimer, &Due, 0, 0, 0, FALSE);
+        }
+        if(Attached && Dirty && !HoldForSync && FrameDue)
         {
             FILETIME Ft = {};
             GetSystemTimeAsFileTime(&Ft);
@@ -1045,8 +1117,11 @@ static int ServerMain()
             if(ClientCells)
             {
                 // clodw draws the cells itself: no VT, no width guessing.
-                if(EncodeCells(OutBytes, Prev, Next, ForceFull, WantMouse, App.PrefixKey, Title, HeaderChanged) &&
-                   !IpcSendString(Client, MSG_CELLS, OutBytes)) { IpcClose(Client); Attached = false; }
+                if(EncodeCells(OutBytes, Prev, Next, ForceFull, WantMouse, App.PrefixKey, Title, HeaderChanged))
+                {
+                    LatencyMark("server_frame");
+                    if(!IpcSendString(Client, MSG_CELLS, OutBytes)) { IpcClose(Client); Attached = false; }
+                }
             }
             else
             {
@@ -1064,7 +1139,7 @@ static int ServerMain()
             std::swap(Prev, Next);
             ForceFull = false;
             Dirty = false;
-            LastFrameMs = NowMs;
+            if(!OutBytes.empty()) { LastFrameUs = NowUs; }
         }
         // Status messages expire on their own.
         if(!App.Status.empty() && NowMs >= App.StatusUntil) { App.Status.clear(); Dirty = true; }

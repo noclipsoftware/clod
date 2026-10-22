@@ -32,6 +32,7 @@ static BOOL WINAPI ClientCtrlHandler(DWORD Type)
 
 static int ClientMain(s32 JumpToTab)
 {
+    RaiseForTyping(GetCurrentProcess());
     HANDLE In = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE Out = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD OldIn = 0, OldOut = 0;

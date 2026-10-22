@@ -11,7 +11,6 @@ struct clodw
     ipc_conn* Server;
     std::wstring FontFamily;
     float FontPt;
-    float FontPtSaved;     // the size in settings.txt; zoom changes only FontPt
     u32 Dpi;
 
     // --- the grid as the server last sent it ---
@@ -89,6 +88,7 @@ static u32 ResolveColor(u32 C, u32 Default)
     return PackRgb(Gray, Gray, Gray);
 }
 
+#define DEFAULT_FONT_PT 12.0f
 #define IDM_FONT 0x0100 // window menu command (system menu ids keep the low 4 bits clear)
 
 // Font size in pixels at the window's DPI; resets the glyph atlas.
@@ -96,6 +96,33 @@ static void ApplyFont(clodw& C)
 {
     FontSetup(C.F, C.G, C.R, C.FontFamily, C.FontPt * (float)C.Dpi / 72.0f);
     C.Dirty = true;
+}
+
+// Writes the font lines of settings.txt (the Font... dialog, zoom), keeping the file's other lines.
+static void SaveFontSettings(const std::wstring& Family, float Pt)
+{
+    std::string Kept;
+    FILE* File = 0;
+    _wfopen_s(&File, SettingsPath().c_str(), L"rb");
+    char Line[512];
+    while(File && fgets(Line, sizeof(Line), File))
+    {
+        std::string Key = Line;
+        Key = Key.substr(0, Key.find('='));
+        while(!Key.empty() && strchr(" \t\r\n", Key.back())) { Key.pop_back(); }
+        if(Key != "font" && Key != "font_size") { Kept += Line; }
+    }
+    if(File) { fclose(File); }
+    if(!Kept.empty() && Kept.back() != '\n') { Kept += "\r\n"; }
+    char Face[LF_FACESIZE * 3] = {};
+    WideCharToMultiByte(CP_UTF8, 0, Family.c_str(), -1, Face, sizeof(Face), 0, 0);
+    char Size[32];
+    snprintf(Size, sizeof(Size), "%g", Pt);
+    Kept += std::string("font = ") + Face + "\r\nfont_size = " + Size + "\r\n";
+    std::wstring Path = SettingsPath();
+    CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
+    _wfopen_s(&File, Path.c_str(), L"wb");
+    if(File) { fwrite(Kept.data(), 1, Kept.size(), File); fclose(File); }
 }
 
 // The selection's start and end in reading order (anchor and moving end may be either way round).
@@ -204,6 +231,7 @@ static void Tick(clodw& C)
     }
     if(!C.InBytes.empty())
     {
+        LatencyMark("client_send");
         if(!IpcSendString(*C.Server, MSG_INPUT, C.InBytes)) { C.Quit = true; }
         C.InBytes.clear();
     }
@@ -216,11 +244,16 @@ static void Tick(clodw& C)
     {
         if(Type == MSG_CELLS && Payload.size() >= sizeof(msg_cells))
         {
+            LatencyMark("client_cells");
             msg_cells H = {};
             memcpy(&H, Payload.data(), sizeof(H));
             size_t At = sizeof(H);
             std::string Title = Payload.substr(At, H.TitleLen);
             At += H.TitleLen;
+            // A new grid or new panes: the selection no longer points at what was selected.
+            bool32 Reshaped = (H.Flags & CELLS_FULL) || H.Width != C.GridW || H.Height != C.GridH ||
+                              H.PaneCount != C.PaneCount || memcmp(H.Panes, C.Panes, sizeof(C.Panes)) != 0;
+            if(Reshaped && (C.HasSelection || C.Selecting)) { C.HasSelection = false; C.Selecting = false; }
             if((H.Flags & CELLS_FULL) || H.Width != C.GridW || H.Height != C.GridH)
             {
                 C.GridW = H.Width;
@@ -472,7 +505,9 @@ static void Tick(clodw& C)
     Consts.StrikeY = (u32)C.F.StrikeY;
     Consts.LineH = (u32)C.F.LineH;
     Consts.CursorThick = (u32)Max(2, C.F.CellW / 6);
-    if(!RendererDraw(C.R, C.Gpu, Consts))
+    bool32 Drawn = RendererDraw(C.R, C.Gpu, Consts);
+    LatencyMark("client_present");
+    if(!Drawn)
     {
         // --- device lost: start the GPU side over (ApplyFont makes new text formats); the next
         // tick redraws everything ---
@@ -581,6 +616,8 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
 
         // --- text: WM_CHAR units to UTF-8; Alt+key arrives as WM_SYSCHAR and gets an ESC prefix ---
         case WM_CHAR:
+            LatencyMark("key");
+            [[fallthrough]];
         case WM_SYSCHAR:
         {
             wchar_t U = (wchar_t)W;
@@ -616,32 +653,8 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             if(!ChooseFontW(&Cf)) { return 0; }
             C->FontFamily = Lf.lfFaceName;
             C->FontPt = Max(Cf.iPointSize, 10) / 10.0f;
-            C->FontPtSaved = C->FontPt;
             ApplyFont(*C);
-
-            // Keep the file's other lines; replace the font ones.
-            std::string Kept;
-            FILE* File = 0;
-            _wfopen_s(&File, SettingsPath().c_str(), L"rb");
-            char Line[512];
-            while(File && fgets(Line, sizeof(Line), File))
-            {
-                std::string Key = Line;
-                Key = Key.substr(0, Key.find('='));
-                while(!Key.empty() && strchr(" \t\r\n", Key.back())) { Key.pop_back(); }
-                if(Key != "font" && Key != "font_size") { Kept += Line; }
-            }
-            if(File) { fclose(File); }
-            if(!Kept.empty() && Kept.back() != '\n') { Kept += "\r\n"; }
-            char Face[LF_FACESIZE * 3] = {};
-            WideCharToMultiByte(CP_UTF8, 0, Lf.lfFaceName, -1, Face, sizeof(Face), 0, 0);
-            char Size[32];
-            snprintf(Size, sizeof(Size), "%g", C->FontPt);
-            Kept += std::string("font = ") + Face + "\r\nfont_size = " + Size + "\r\n";
-            std::wstring Path = SettingsPath();
-            CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
-            _wfopen_s(&File, Path.c_str(), L"wb");
-            if(File) { fwrite(Kept.data(), 1, Kept.size(), File); fclose(File); }
+            SaveFontSettings(C->FontFamily, C->FontPt);
             return 0;
         }
 
@@ -680,21 +693,30 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             s32 Button = (Msg == WM_LBUTTONDOWN) ? 0 : (Msg == WM_MBUTTONDOWN ? 1 : 2);
             s32 Cx = GET_X_LPARAM(L) / Max(C->F.CellW, 1);
             s32 Cy = GET_Y_LPARAM(L) / Max(C->F.CellH, 1);
+            if(C->MouseHeld || C->Selecting) { return 0; } // a second button during a drag
             if(C->HasSelection) { C->HasSelection = false; C->Dirty = true; }
 
-            // --- Ctrl+click opens the http/https/file link under the pointer ---
+            // --- Ctrl+click opens the http/https link under the pointer (not file://: that could run a
+            // program); the scan stays inside the pane ---
             if(Button == 0 && (W & MK_CONTROL) && Cy >= 0 && Cy < C->GridH && Cx >= 0 && Cx < C->GridW)
             {
                 const cell* Row = C->Grid.data() + (size_t)Cy * C->GridW;
                 auto Stop = [](u32 Cp) { return Cp <= ' ' || (Cp < 0x80 && strchr("<>\"'`|", (int)Cp)); };
+                s32 Lo = 0;
+                s32 Hi = C->GridW - 1;
+                for(s32 P = 0; P < C->PaneCount; ++P)
+                {
+                    const s32* R = C->Panes[P];
+                    if(Cx >= R[0] && Cx < R[0] + R[2] && Cy >= R[1] && Cy < R[1] + R[3]) { Lo = R[0]; Hi = Min(R[0] + R[2] - 1, Hi); }
+                }
                 s32 X0 = Cx;
                 s32 X1 = Cx;
-                while(X0 > 0 && !Stop(Row[X0 - 1].Codepoint)) { X0 -= 1; }
-                while(X1 + 1 < C->GridW && !Stop(Row[X1 + 1].Codepoint)) { X1 += 1; }
+                while(X0 > Lo && !Stop(Row[X0 - 1].Codepoint)) { X0 -= 1; }
+                while(X1 < Hi && !Stop(Row[X1 + 1].Codepoint)) { X1 += 1; }
                 std::string Link;
                 for(s32 X = X0; X <= X1; ++X) { if(!(Row[X].Flags & CELL_WIDE_CONT) && !Stop(Row[X].Codepoint)) { AppendUtf8(Link, Row[X].Codepoint); } }
                 while(!Link.empty() && strchr(".,;:!?)]}", Link.back())) { Link.pop_back(); }
-                if(Link.compare(0, 7, "http://") == 0 || Link.compare(0, 8, "https://") == 0 || Link.compare(0, 7, "file://") == 0)
+                if(Link.compare(0, 7, "http://") == 0 || Link.compare(0, 8, "https://") == 0)
                 {
                     std::wstring Wide(Link.size() + 1, 0);
                     Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Link.data(), (int)Link.size(), &Wide[0], (int)Wide.size()));
@@ -759,16 +781,36 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         case WM_LBUTTONUP: case WM_MBUTTONUP:
         {
             s32 Button = (Msg == WM_LBUTTONUP) ? 0 : 1;
-            ReleaseCapture();
             if(C->Selecting && Button == 0)
             {
                 // A finished selection goes straight to the clipboard and stays highlighted.
                 C->Selecting = false;
                 if(C->HasSelection && !C->CopyOnSelectOff) { CopySelection(*C); }
-                if(!C->MouseHeld) { return 0; }
             }
-            C->MouseHeld = 0;
-            MouseReport(*C, Button, L, true);
+            if(C->MouseHeld == Button + 1) // only a release whose press was reported (not a link click)
+            {
+                C->MouseHeld = 0;
+                MouseReport(*C, Button, L, true);
+            }
+            ReleaseCapture(); // last: it sends WM_CAPTURECHANGED, which must find nothing left to end
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+        {
+            // Capture lost mid-drag (Alt+Tab, the Win key, a lock screen): end the selection, and let
+            // the program see its button go up where the pointer last was.
+            if((HWND)L == Window) { return 0; }
+            if(C->Selecting)
+            {
+                C->Selecting = false;
+                if(C->HasSelection && !C->CopyOnSelectOff) { CopySelection(*C); }
+            }
+            if(C->MouseHeld)
+            {
+                LPARAM At = MAKELPARAM(Max(C->MouseX - 1, 0) * C->F.CellW, Max(C->MouseY - 1, 0) * C->F.CellH);
+                MouseReport(*C, C->MouseHeld - 1, At, true);
+                C->MouseHeld = 0;
+            }
             return 0;
         }
         case WM_MOUSEMOVE:
@@ -805,6 +847,7 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                 {
                     C->FontPt = fminf(fmaxf(C->FontPt + (Up ? 1.0f : -1.0f), 6.0f), 72.0f);
                     ApplyFont(*C);
+                    SaveFontSettings(C->FontFamily, C->FontPt);
                     continue;
                 }
                 C->MouseX = 0; // a wheel report is never a duplicate
@@ -819,8 +862,9 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
 static int WindowMain(s32 JumpToTab)
 {
     static clodw C = {};
+    RaiseForTyping(GetCurrentProcess());
     C.FontFamily = L"Cascadia Mono";
-    C.FontPt = 12.0f;
+    C.FontPt = DEFAULT_FONT_PT;
     C.KeepActiveOff = (ReadSetting("keep_active") == "off");
     C.CopyOnSelectOff = (ReadSetting("copy_on_select") == "off");
 
@@ -834,7 +878,6 @@ static int WindowMain(s32 JumpToTab)
     }
     float Size = (float)atof(ReadSetting("font_size").c_str());
     if(Size > 0) { C.FontPt = Size; }
-    C.FontPtSaved = C.FontPt;
 
     // --- window, renderer and font; sized to 120x36 cells at the monitor's DPI ---
     HINSTANCE Instance = GetModuleHandleW(0);
@@ -864,8 +907,12 @@ static int WindowMain(s32 JumpToTab)
     bool32 Placed = PlaceFile && fscanf_s(PlaceFile, "%ld %ld %ld %ld %d", &Place.rcNormalPosition.left, &Place.rcNormalPosition.top,
                                           &Place.rcNormalPosition.right, &Place.rcNormalPosition.bottom, &Maximized) == 5;
     if(PlaceFile) { fclose(PlaceFile); }
-    Placed = Placed && Place.rcNormalPosition.right - Place.rcNormalPosition.left >= 100 && Place.rcNormalPosition.bottom - Place.rcNormalPosition.top >= 50 &&
-             MonitorFromRect(&Place.rcNormalPosition, MONITOR_DEFAULTTONULL);
+    // Still usable: a good part of it (say its title bar) lies on a monitor's work area, not just a sliver.
+    MONITORINFO Monitor = {sizeof(Monitor)};
+    RECT Visible = {};
+    Placed = Placed && GetMonitorInfoW(MonitorFromRect(&Place.rcNormalPosition, MONITOR_DEFAULTTONEAREST), &Monitor) &&
+             IntersectRect(&Visible, &Monitor.rcWork, &Place.rcNormalPosition) && Visible.right - Visible.left >= 200 &&
+             Visible.bottom - Visible.top >= 100;
     if(Placed)
     {
         Place.showCmd = SW_HIDE;
@@ -963,14 +1010,15 @@ static int WindowMain(s32 JumpToTab)
                     continue;
                 }
 
-                // --- zoom: Ctrl+= / Ctrl+- change the font size for this window, Ctrl+0 goes back ---
+                // --- zoom: Ctrl+= / Ctrl+- change the font size, Ctrl+0 goes back to the default; saved like Font... ---
                 bool32 ZoomIn = Msg.wParam == VK_OEM_PLUS || Msg.wParam == VK_ADD;
                 bool32 ZoomOut = Msg.wParam == VK_OEM_MINUS || Msg.wParam == VK_SUBTRACT;
                 bool32 ZoomReset = Msg.wParam == '0' || Msg.wParam == VK_NUMPAD0;
                 if(Ctrl && !Alt && !Shift && (ZoomIn || ZoomOut || ZoomReset))
                 {
-                    C.FontPt = ZoomReset ? C.FontPtSaved : fminf(fmaxf(C.FontPt + (ZoomIn ? 1.0f : -1.0f), 6.0f), 72.0f);
+                    C.FontPt = ZoomReset ? DEFAULT_FONT_PT : fminf(fmaxf(C.FontPt + (ZoomIn ? 1.0f : -1.0f), 6.0f), 72.0f);
                     ApplyFont(C);
+                    SaveFontSettings(C.FontFamily, C.FontPt);
                     continue;
                 }
                 // --- clod commands without the prefix (only a window can tell Ctrl+Shift+T from Ctrl+T):

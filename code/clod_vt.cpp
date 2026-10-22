@@ -16,7 +16,7 @@ enum vt_parse_state
 
 #define VT_MAX_PARAMS 16
 #define VT_SCROLLBACK_MAX 10000
-#define VT_OSC_MAX 65536
+#define VT_OSC_MAX (4 << 20) // OSC 52 carries whole copies (base64)
 
 struct vt_terminal
 {

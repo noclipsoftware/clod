@@ -95,6 +95,45 @@ static std::wstring InstanceSuffix()
     return std::wstring();
 }
 
+// Microseconds on the system-wide performance counter (comparable across processes).
+static u64 QpcUs()
+{
+    LARGE_INTEGER Now = {}, Freq = {};
+    QueryPerformanceCounter(&Now);
+    QueryPerformanceFrequency(&Freq);
+    return (u64)((Now.QuadPart / Freq.QuadPart) * 1000000 + (Now.QuadPart % Freq.QuadPart) * 1000000 / Freq.QuadPart);
+}
+
+// For a process on the typing path (clodw, the server, a tab's console host, cmd, claude): above-normal
+// priority so a busy machine (a build) can't hold up an echo, and no power throttling (Windows parks
+// windowless processes on slow cores). Children they start still get normal priority.
+static void RaiseForTyping(HANDLE Process)
+{
+    SetPriorityClass(Process, ABOVE_NORMAL_PRIORITY_CLASS);
+    PROCESS_POWER_THROTTLING_STATE Throttle = {};
+    Throttle.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    Throttle.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    SetProcessInformation(Process, ProcessPowerThrottling, &Throttle, sizeof(Throttle));
+}
+
+// CLOD_LATENCY=1: each process appends "<what> <microseconds>" lines to %TEMP%\clod-latency-<pid>.txt
+// at every hop a keystroke takes (one clock for all processes), for tools\latency.py.
+static void LatencyMark(const char* What)
+{
+    static FILE* File = []() -> FILE*
+    {
+        if(!GetEnvironmentVariableW(L"CLOD_LATENCY", 0, 0)) { return 0; }
+        wchar_t Temp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, Temp);
+        FILE* F = 0;
+        _wfopen_s(&F, (std::wstring(Temp) + L"clod-latency-" + std::to_wstring(GetCurrentProcessId()) + L".txt").c_str(), L"ab");
+        return F;
+    }();
+    if(!File) { return; }
+    fprintf(File, "%s %llu\n", What, QpcUs());
+    fflush(File);
+}
+
 static std::wstring PipeName()
 {
     return L"\\\\.\\pipe\\clod-" + CurrentUserSid() + InstanceSuffix();

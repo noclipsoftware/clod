@@ -42,8 +42,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
     selection (else it's ^C for the program), Ctrl+Shift+C copies, typing or clicking clears it.
     A finished selection is copied at once (`copy_on_select = off` in settings.txt stops that);
     right-click pastes and is never reported to programs (Claude's fullscreen has no use for it).
-  - Zoom: Ctrl+= / Ctrl+- / Ctrl+wheel change the font size for this window only; Ctrl+0 goes
-    back to settings.txt's size.
+  - Zoom: Ctrl+= / Ctrl+- / Ctrl+wheel change the font size and save it to settings.txt like
+    Font... does; Ctrl+0 goes back to the 12 pt default. A new grid or new panes clear the selection.
   - Turn finished (and OSC 9/777, bell): the tray balloon fires when the tab isn't on screen or
     the client window isn't in the foreground; for clodw the server also sends BEL, which flashes
     its taskbar button while it's in the background.
@@ -52,7 +52,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   - The window's place (normal rect + maximized) is saved on exit to
     `%LOCALAPPDATA%\clod\window<instance>.txt` and restored if still on a monitor; not for `--test`.
   - OSC 52 from a program (how Claude Code copies) arrives in `MSG_OUTPUT` and goes to the
-    clipboard. Ctrl+click opens an http/https/file URL found in the text under the pointer.
+    clipboard. Ctrl+click opens an http/https URL found under the pointer (within its pane; never
+    file://, which could run a program).
   - IME: composition and candidate windows are placed at the cursor in the window's font.
   - Cursor shape: the emulator keeps DECSCUSR (`vt_terminal::CursorShape`); the frame carries it
     (console clients get it re-sent, clodw draws block/underline/bar and blinks the odd shapes).
@@ -65,6 +66,21 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 - `code/clod_app.cpp` is the pure core. Input becomes `app_command`s that the server executes;
   `Compose` turns state into a cell grid; `RenderFrame` diffs two grids into VT bytes.
   Keep OS calls out of it.
+
+## Typing latency (keep it ~1 ms, even on a busy machine)
+
+- Measured key-to-present: ~1 ms in a cmd tab, idle or with every core busy. ConPTY + cmd/clink
+  echo take ~0.3 ms; in a claude tab Claude's own renderer adds ~5 ms (up to ~40). Measure with
+  `CLOD_LATENCY=1` (every process appends timestamps at each hop to `%TEMP%\clod-latency-<pid>.txt`)
+  and `python tools/latency.py`.
+- The server's frame cap (one per 8 ms) is timed with `QpcUs` and a high-resolution waitable timer
+  (`FrameTimer`), and only frames that carried changes count: a keystroke's own empty frame must not
+  hold back its echo. Plain wait timeouts and `GetTickCount64` round to ~16 ms.
+- Nothing slow on the server's loop: the once-a-second process snapshot for claude detection runs
+  on its own thread (`ClaudeScanThread`), it used to stall echoes by 20-40 ms.
+- `RaiseForTyping`: clodw, the clients, the server, each tab's cmd and console host (conhost, a
+  child of the server) and each claude run above normal priority with power throttling off, so a
+  build can't starve the echo path (it took 70-150 ms before). What they start stays normal.
 
 ## Panes
 

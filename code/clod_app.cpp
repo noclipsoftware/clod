@@ -1137,7 +1137,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         pane_rect PR = PaneRect(App, Pane);
         const tab* PaneTab = App.PaneTab[Pane];
         // The sessions page takes clicks itself; a program gets them as in HandleInput.
-        if(!PaneTab || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited)) { F.PaneMouseTaken |= 1u << Pane; }
+        bool32 Taken = !PaneTab || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited);
+        if(Taken && !App.MouseCaptureOff) { F.PaneMouseTaken |= 1u << Pane; } // capture off: every drag selects
         bool32 Focused = (Pane == App.Focus);
         s32 Top = PR.Y;
         s32 Left = PR.X;

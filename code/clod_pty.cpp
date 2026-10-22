@@ -20,6 +20,7 @@ static DWORD WINAPI PtyReaderThread(void* Param)
     {
         DWORD Read = 0;
         if(!ReadFile(P->OutputRead, Buf, sizeof(Buf), &Read, 0) || Read == 0) { break; }
+        LatencyMark("pty_read");
         EnterCriticalSection(&P->Lock);
         P->Pending.append(Buf, Read);
         LeaveCriticalSection(&P->Lock);
@@ -66,9 +67,10 @@ static pty* PtyStart(const std::wstring& CommandLine, const std::wstring& Cwd, c
 
     std::wstring Cmd = CommandLine; // CreateProcessW may modify its command line buffer
     PROCESS_INFORMATION Pi = {};
-    BOOL Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, (void*)Env,
+    BOOL Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | ABOVE_NORMAL_PRIORITY_CLASS, (void*)Env,
                              Cwd.empty() ? 0 : Cwd.c_str(), &Si.StartupInfo, &Pi);
     DeleteProcThreadAttributeList(Si.lpAttributeList);
+    if(Ok) { RaiseForTyping(Pi.hProcess); }
     if(!Ok)
     {
         char Buf[64];
