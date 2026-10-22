@@ -35,6 +35,7 @@ struct alignas(16) gpu_consts
 };
 
 #define ATLAS_SIZE 2048
+#define GLYPH_MAX_CELLS 16 // widest glyph run: the Direct2D scratch surface is this many cells wide
 
 struct renderer
 {
@@ -187,14 +188,14 @@ static bool32 RendererCreate(renderer& R, HWND Window)
     return true;
 }
 
-// The Direct2D scratch surface glyphs are drawn into: two cells wide, so wide glyphs fit.
+// The Direct2D scratch surface glyphs are drawn into: wide enough for the longest cluster.
 static void RendererSetCellSize(renderer& R, s32 CellW, s32 CellH)
 {
     ReleaseCom(R.White);
     ReleaseCom(R.Draw2D);
     ReleaseCom(R.Scratch);
     D3D11_TEXTURE2D_DESC TDesc = {};
-    TDesc.Width = (UINT)(CellW * 2);
+    TDesc.Width = (UINT)(CellW * GLYPH_MAX_CELLS);
     TDesc.Height = (UINT)CellH;
     TDesc.MipLevels = 1;
     TDesc.ArraySize = 1;

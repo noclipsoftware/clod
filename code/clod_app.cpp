@@ -1437,7 +1437,7 @@ static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next
                 // Joiners, combining marks etc. would merge into the neighbour and shift the row.
                 Body += ' ';
             }
-            else if(Cp >= 0x1F1E6 && Cp <= 0x1F1FF)
+            else if(IsRegionalIndicator(Cp))
             {
                 // Regional indicators pair up into one flag glyph; spell them as letters instead.
                 Body += (char)('A' + (Cp - 0x1F1E6));

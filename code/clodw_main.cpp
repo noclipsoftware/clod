@@ -212,24 +212,64 @@ static void Tick(clodw& C)
                 u32 Flags = ((K.Attr & ATTR_UNDERLINE) ? GPU_UNDERLINE : 0) | ((K.Attr & ATTR_STRIKE) ? GPU_STRIKE : 0);
                 bool32 Wide = (K.Flags & CELL_WIDE) && X + 1 < C.GridW;
                 u32 Cp = K.Codepoint;
-                // Blanks, controls, orphaned second halves, hidden text, and (until clusters are drawn
-                // whole) the marks and joiners that would combine with a neighbour.
+                // Blanks, controls, orphaned second halves, hidden text, and marks or joiners with no
+                // base before them.
                 bool32 Blank = Cp <= ' ' || (K.Flags & CELL_WIDE_CONT) || (K.Attr & ATTR_HIDDEN) || IsClusterExtender(Cp) ||
                                ((K.Flags & CELL_WIDE) && !Wide);
+                const cell* Row = C.Grid.data() + (size_t)Y * C.GridW;
+
+                // --- the cluster starting here: the base plus the cells after it that join it (marks,
+                // selectors, joiners and what they join, skin tones, keycaps, a flag's second letter).
+                // ConPTY gives each part its own cell; the cluster is drawn as one glyph across them ---
+                u32 Cps[GLYPH_MAX_CPS] = {};
+                u32 Count = 0;
+                s32 Span = Wide ? 2 : 1;
+                s32 MaxSpan = Min(GLYPH_MAX_CELLS, (s32)C.G.TilesX); // a glyph's tiles share one atlas row
+                if(!Blank)
+                {
+                    Cps[Count++] = Cp;
+                    bool32 Flag = IsRegionalIndicator(Cp);
+                    for(;;)
+                    {
+                        s32 Nx = X + Span;
+                        if(Nx >= C.GridW || Count >= GLYPH_MAX_CPS) { break; }
+                        u32 Next = Row[Nx].Codepoint;
+                        s32 Add = ((Row[Nx].Flags & CELL_WIDE) && Nx + 1 < C.GridW) ? 2 : 1;
+                        // After a joiner only an emoji or symbol joins, never e.g. a pane's separator line.
+                        bool32 AfterZwj = Cps[Count - 1] == 0x200D && (Next >= 0x1F000 || (Next >= 0x2600 && Next <= 0x27BF));
+                        bool32 Joins = Next > ' ' && (IsClusterExtender(Next) || AfterZwj || (Flag && Count == 1 && IsRegionalIndicator(Next)));
+                        if(!Joins || Span + Add > MaxSpan) { break; }
+                        Cps[Count++] = Next;
+                        Span += Add;
+                    }
+                }
+
                 u32 Tile = 0;
                 bool32 Color = false;
                 if(!Blank)
                 {
                     u32 Style = ((K.Attr & ATTR_BOLD) ? STYLE_BOLD : 0) | ((K.Attr & ATTR_ITALIC) ? STYLE_ITALIC : 0);
-                    if(!GlyphLookup(C.G, C.F, C.R, &Cp, 1, Style, Wide ? 2 : 1, &Tile, &Color)) { AtlasFull = true; break; }
+                    bool32 Overflow = false;
+                    if(!GlyphLookup(C.G, C.F, C.R, Cps, Count, Style, Span, &Tile, &Color, &Overflow)) { AtlasFull = true; break; }
+                    // A glyph wider than its cells (symbols from a fallback font, emoji a bit over two cells)
+                    // may spill into a following blank cell of the same style and draw full size;
+                    // otherwise it stays squeezed.
+                    s32 Nx = X + Span;
+                    bool32 UnderCursor = !C.CursorHidden && C.CursorY == Y && C.CursorX == Nx; // the block would cut the glyph
+                    bool32 Room = Overflow && !UnderCursor && Nx < C.GridW && Span < MaxSpan && (Row[Nx].Codepoint == 0 || Row[Nx].Codepoint == ' ') &&
+                                  !Row[Nx].Flags && Row[Nx].Fg == K.Fg && Row[Nx].Bg == K.Bg && Row[Nx].Attr == K.Attr;
+                    if(Room)
+                    {
+                        Span += 1;
+                        if(!GlyphLookup(C.G, C.F, C.R, Cps, Count, Style, Span, &Tile, &Color, &Overflow)) { AtlasFull = true; break; }
+                    }
                 }
                 if(Color) { Flags |= GPU_COLOR; }
-                C.Gpu[I] = gpu_cell{Tile, Fg, Bg, Flags};
-                if(Wide)
+                for(s32 Part = 0; Part < Span; ++Part)
                 {
-                    C.Gpu[I + 1] = gpu_cell{Tile ? Tile + 1 : 0, Fg, Bg, Flags};
-                    X += 1;
+                    C.Gpu[I + Part] = gpu_cell{Tile ? Tile + (u32)Part : 0, Fg, Bg, Flags};
                 }
+                X += Span - 1;
             }
         }
         if(!AtlasFull) { break; }
@@ -244,7 +284,8 @@ static void Tick(clodw& C)
         u32 Tile = 0;
         bool32 Color = false;
         size_t I = (size_t)C.GridH * C.GridW - 1;
-        if(GlyphLookup(C.G, C.F, C.R, &Dot, 1, 0, 1, &Tile, &Color))
+        bool32 Overflow = false;
+        if(GlyphLookup(C.G, C.F, C.R, &Dot, 1, 0, 1, &Tile, &Color, &Overflow))
         {
             C.Gpu[I].Tile = Tile;
             C.Gpu[I].Fg = C.Keeping ? PackRgb(90, 210, 110) : PackRgb(100, 100, 100);
@@ -275,8 +316,8 @@ static void Tick(clodw& C)
     Consts.LineH = (u32)C.F.LineH;
     if(!RendererDraw(C.R, C.Gpu, Consts))
     {
-        // --- device lost: start the GPU side over; the next tick redraws everything ---
-        for(IDWriteTextFormat*& Format : C.F.Formats) { ReleaseCom(Format); }
+        // --- device lost: start the GPU side over (ApplyFont makes new text formats); the next
+        // tick redraws everything ---
         RendererRelease(C.R);
         if(!RendererCreate(C.R, C.Window)) { C.Quit = true; return; }
         ApplyFont(C);

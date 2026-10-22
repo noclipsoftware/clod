@@ -26,6 +26,13 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   cells). Input goes back as VT bytes, so `HandleInput` serves both clients. Font and size: the
   window menu's Font... (any installed font) or `~\.clod\settings.txt` (`font`, `font_size`).
   Written from scratch after refterm's technique; refterm is GPL-2.0, so copy none of its code.
+- clodw text (stage 2): cells come from ConPTY one codepoint each, so clodw groups a base cell
+  with the cells that join it (`IsClusterExtender`, what follows a ZWJ, a flag's second letter)
+  and draws the cluster as one glyph across all of them (up to `GLYPH_MAX_CELLS`), leaving blank
+  the cells ConPTY gave the parts. Color clusters (FE0F, emoji) use Segoe UI Emoji first, else
+  the main font's own monochrome glyph wins. A one-cell glyph wider than its cell spills into a
+  following blank cell of the same style; otherwise it's squeezed sideways (full height). Flags
+  stay letters: Windows ships no flag emoji.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in

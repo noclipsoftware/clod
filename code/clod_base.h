@@ -108,6 +108,9 @@ static s32 CharWidth(u32 Cp)
     return 1;
 }
 
+// Regional indicator letters: two in a row make a flag.
+static bool32 IsRegionalIndicator(u32 Cp) { return Cp >= 0x1F1E6 && Cp <= 0x1F1FF; }
+
 // Characters a grapheme-aware terminal (Windows Terminal) merges into the previous glyph instead of
 // giving them a cell: combining marks, joiners, selectors, skin tones, tags, invisible formatting.
 // Conhost gives each its own cell, so the renderer draws them as blanks to keep columns aligned.
