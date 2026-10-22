@@ -33,6 +33,17 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   the main font's own monochrome glyph wins. A one-cell glyph wider than its cell spills into a
   following blank cell of the same style; otherwise it's squeezed sideways (full height). Flags
   stay letters: Windows ships no flag emoji.
+- clodw input and clipboard (stage 3, all client-side):
+  - Selection: a plain drag while no program has the mouse (`MouseMode` 0), Shift+drag always;
+    it stays in the pane it started in (pane rects come in the `MSG_CELLS` header). Ctrl+C
+    copies when there's a selection (else it's ^C for the program), Ctrl+Shift+C copies, typing
+    or clicking clears it.
+  - OSC 52 from a program (how Claude Code copies) arrives in `MSG_OUTPUT` and goes to the
+    clipboard. Ctrl+click opens an http/https/file URL found in the text under the pointer.
+  - IME: composition and candidate windows are placed at the cursor in the window's font.
+  - Cursor shape: the emulator keeps DECSCUSR (`vt_terminal::CursorShape`); the frame carries it
+    (console clients get it re-sent, clodw draws block/underline/bar and blinks the odd shapes).
+  - With `clodw.exe` next to `clod.exe`, the tray (`LaunchClientWindow`) opens clodw.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in

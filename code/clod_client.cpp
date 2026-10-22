@@ -239,7 +239,7 @@ static int ClientMain(s32 JumpToTab)
 
     IpcClose(Server);
     if(Capture) { fclose(Capture); }
-    ConsoleWrite(Out, "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[?25h\x1b]0;\x07\x1b[?1049l");
+    ConsoleWrite(Out, "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[0 q\x1b[?25h\x1b]0;\x07\x1b[?1049l");
     SetConsoleMode(Out, OldOut);
     SetConsoleMode(In, OldIn);
     SetConsoleOutputCP(OldCp);

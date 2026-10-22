@@ -22,7 +22,21 @@ struct clodw
     bool32 CursorHidden;
     s32 MouseMode;
     u32 PrefixKey;   // the server's command prefix, for the direct shortcuts
+    s32 CursorShape; // DECSCUSR from the server (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
+    s32 PaneCount;
+    s32 Panes[4][4]; // pane rectangles {x, y, w, h}: a selection stays inside one
     std::string Title;
+
+    // --- selection, in cells (inclusive): drag, or Shift+drag while a program has the mouse ---
+    bool32 Selecting;      // a drag is under way
+    bool32 HasSelection;
+    s32 SelPane[4];        // the pane rectangle the selection is confined to
+    s32 SelAx;             // anchor
+    s32 SelAy;
+    s32 SelBx;             // moving end
+    s32 SelBy;
+    bool32 BlinkOff;       // a blinking cursor is in its hidden phase
+    u64 BlinkAtMs;         // last blink toggle; input restarts it visible
 
     std::string InBytes;   // input not yet sent
     bool32 Dirty;          // the window needs a redraw
@@ -75,6 +89,32 @@ static void ApplyFont(clodw& C)
 {
     FontSetup(C.F, C.G, C.R, C.FontFamily, C.FontPt * (float)C.Dpi / 72.0f);
     C.Dirty = true;
+}
+
+// The selection's start and end in reading order (anchor and moving end may be either way round).
+static void SelectionRange(const clodw& C, s32* Sx, s32* Sy, s32* Ex, s32* Ey)
+{
+    bool32 Forward = C.SelAy < C.SelBy || (C.SelAy == C.SelBy && C.SelAx <= C.SelBx);
+    *Sx = Forward ? C.SelAx : C.SelBx;
+    *Sy = Forward ? C.SelAy : C.SelBy;
+    *Ex = Forward ? C.SelBx : C.SelAx;
+    *Ey = Forward ? C.SelBy : C.SelAy;
+}
+
+// Puts UTF-8 text on the clipboard (a selection copy, or a program's OSC 52).
+static void SetClipboardText(HWND Window, const std::string& Utf8)
+{
+    int Len = MultiByteToWideChar(CP_UTF8, 0, Utf8.data(), (int)Utf8.size(), 0, 0);
+    HGLOBAL Mem = GlobalAlloc(GMEM_MOVEABLE, (size_t)(Len + 1) * sizeof(wchar_t));
+    if(!Mem) { return; }
+    wchar_t* Wide = (wchar_t*)GlobalLock(Mem);
+    MultiByteToWideChar(CP_UTF8, 0, Utf8.data(), (int)Utf8.size(), Wide, Len);
+    Wide[Len] = 0;
+    GlobalUnlock(Mem);
+    if(!OpenClipboard(Window)) { GlobalFree(Mem); return; }
+    EmptyClipboard();
+    if(!SetClipboardData(CF_UNICODETEXT, Mem)) { GlobalFree(Mem); }
+    CloseClipboard();
 }
 
 // One round of work: send input and size, apply what the server sent, redraw if anything changed.
@@ -138,6 +178,9 @@ static void Tick(clodw& C)
             C.CursorHidden = (H.Flags & CELLS_CURSOR_HIDDEN) != 0;
             C.MouseMode = H.MouseMode;
             C.PrefixKey = H.PrefixKey;
+            C.CursorShape = H.CursorShape;
+            C.PaneCount = Clamp(H.PaneCount, 0, 4);
+            memcpy(C.Panes, H.Panes, sizeof(C.Panes));
             if(Title != C.Title)
             {
                 C.Title = Title;
@@ -149,11 +192,32 @@ static void Tick(clodw& C)
         }
         else if(Type == MSG_OUTPUT)
         {
-            // Pass-through bytes meant for a terminal: only the bell matters to a window.
+            // Pass-through bytes meant for a terminal: the bell, and OSC 52 "set the clipboard"
+            // (how Claude Code copies), "ESC ] 52 ; <targets> ; <base64> ESC \".
             if(Payload.find('\x07') != std::string::npos && GetForegroundWindow() != C.Window)
             {
                 FLASHWINFO Flash = {sizeof(Flash), C.Window, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
                 FlashWindowEx(&Flash);
+            }
+            for(size_t At = Payload.find("\x1b]52;"); At != std::string::npos; At = Payload.find("\x1b]52;", At + 1))
+            {
+                size_t Semi = Payload.find(';', At + 5);
+                size_t End = Payload.find("\x1b\\", At);
+                if(Semi == std::string::npos || End == std::string::npos || Semi > End) { continue; }
+                std::string Text;
+                u32 Bits = 0;
+                s32 BitCount = 0;
+                for(size_t I = Semi + 1; I < End; ++I)
+                {
+                    char Ch = Payload[I];
+                    s32 V = (Ch >= 'A' && Ch <= 'Z') ? Ch - 'A' : (Ch >= 'a' && Ch <= 'z') ? Ch - 'a' + 26 :
+                            (Ch >= '0' && Ch <= '9') ? Ch - '0' + 52 : (Ch == '+') ? 62 : (Ch == '/') ? 63 : -1;
+                    if(V < 0) { continue; } // '=' padding; a "?" query has no data and sets nothing
+                    Bits = (Bits << 6) | (u32)V;
+                    BitCount += 6;
+                    if(BitCount >= 8) { BitCount -= 8; Text += (char)((Bits >> BitCount) & 0xFF); }
+                }
+                if(!Text.empty()) { SetClipboardText(C.Window, Text); }
             }
         }
         else if(Type == MSG_BYE)
@@ -188,6 +252,15 @@ static void Tick(clodw& C)
         }
     }
     if(Keeping != C.Keeping) { C.Keeping = Keeping; C.Dirty = true; }
+
+    // --- a blinking cursor (odd DECSCUSR shapes) toggles every 530 ms ---
+    u64 NowMs = GetTickCount64();
+    if((C.CursorShape & 1) && !C.CursorHidden && NowMs - C.BlinkAtMs >= 530)
+    {
+        C.BlinkOff = !C.BlinkOff;
+        C.BlinkAtMs = NowMs;
+        C.Dirty = true;
+    }
 
     if(!C.Dirty || C.Grid.empty() || C.Quit) { return; }
     C.Dirty = false;
@@ -292,16 +365,36 @@ static void Tick(clodw& C)
         }
     }
 
-    // --- block cursor: the cell (both halves of a wide one) with its colors swapped ---
-    if(!C.CursorHidden && C.CursorX >= 0 && C.CursorX < C.GridW && C.CursorY >= 0 && C.CursorY < C.GridH)
+    // --- the selection: rows from start to end, each clipped to the selection's pane ---
+    if(C.HasSelection)
+    {
+        s32 Sx = 0, Sy = 0, Ex = 0, Ey = 0;
+        SelectionRange(C, &Sx, &Sy, &Ex, &Ey);
+        for(s32 Y = Max(Sy, 0); Y <= Ey && Y < C.GridH; ++Y)
+        {
+            s32 X0 = (Y == Sy) ? Sx : C.SelPane[0];
+            s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
+            for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X) { C.Gpu[(size_t)Y * C.GridW + X].Bg = PackRgb(38, 79, 120); }
+        }
+    }
+
+    // --- cursor, in the shape the program asked for (DECSCUSR): a block swaps the cell's colors
+    // (both halves of a wide one), an underline or bar is drawn by the shader; odd shapes blink ---
+    bool32 Blinks = (C.CursorShape & 1) != 0;
+    if(!C.CursorHidden && !(Blinks && C.BlinkOff) && C.CursorX >= 0 && C.CursorX < C.GridW && C.CursorY >= 0 && C.CursorY < C.GridH)
     {
         size_t I = (size_t)C.CursorY * C.GridW + C.CursorX;
         size_t Count = (C.Grid[I].Flags & CELL_WIDE) && C.CursorX + 1 < C.GridW ? 2 : 1;
         for(size_t K = I; K < I + Count; ++K)
         {
-            u32 T = C.Gpu[K].Fg;
-            C.Gpu[K].Fg = C.Gpu[K].Bg;
-            C.Gpu[K].Bg = T;
+            if(C.CursorShape == 3 || C.CursorShape == 4) { C.Gpu[K].Flags |= GPU_CURSOR_UNDER; }
+            else if(C.CursorShape == 5 || C.CursorShape == 6) { if(K == I) { C.Gpu[K].Flags |= GPU_CURSOR_BAR; } }
+            else
+            {
+                u32 T = C.Gpu[K].Fg;
+                C.Gpu[K].Fg = C.Gpu[K].Bg;
+                C.Gpu[K].Bg = T;
+            }
         }
     }
 
@@ -314,6 +407,7 @@ static void Tick(clodw& C)
     Consts.UnderlineY = (u32)C.F.UnderlineY;
     Consts.StrikeY = (u32)C.F.StrikeY;
     Consts.LineH = (u32)C.F.LineH;
+    Consts.CursorThick = (u32)Max(2, C.F.CellW / 6);
     if(!RendererDraw(C.R, C.Gpu, Consts))
     {
         // --- device lost: start the GPU side over (ApplyFont makes new text formats); the next
@@ -486,6 +580,28 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             return 0;
         }
 
+        // --- IME (Chinese, Japanese, Korean input): composition and candidates appear at the cursor,
+        // in the window's font; Windows sends the finished text as WM_CHAR ---
+        case WM_IME_STARTCOMPOSITION:
+        case WM_IME_COMPOSITION:
+        {
+            HIMC Imc = ImmGetContext(Window);
+            if(Imc)
+            {
+                POINT At = {C->CursorX * C->F.CellW, C->CursorY * C->F.CellH};
+                COMPOSITIONFORM Form = {CFS_POINT, At, {}};
+                ImmSetCompositionWindow(Imc, &Form);
+                CANDIDATEFORM Candidates = {0, CFS_CANDIDATEPOS, {At.x, At.y + C->F.CellH}, {}};
+                ImmSetCandidateWindow(Imc, &Candidates);
+                LOGFONTW Font = {};
+                Font.lfHeight = -C->F.CellH;
+                wcsncpy_s(Font.lfFaceName, C->FontFamily.c_str(), _TRUNCATE);
+                ImmSetCompositionFontW(Imc, &Font);
+                ImmReleaseContext(Window, Imc);
+            }
+            break;
+        }
+
         case WM_SETFOCUS: C->InBytes += "\x1b[I"; C->Dirty = true; return 0;  // Dirty: the keep-active light
         case WM_KILLFOCUS: C->InBytes += "\x1b[O"; C->Dirty = true; return 0;
 
@@ -493,6 +609,47 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONDOWN:
         {
             s32 Button = (Msg == WM_LBUTTONDOWN) ? 0 : (Msg == WM_MBUTTONDOWN ? 1 : 2);
+            s32 Cx = GET_X_LPARAM(L) / Max(C->F.CellW, 1);
+            s32 Cy = GET_Y_LPARAM(L) / Max(C->F.CellH, 1);
+            if(C->HasSelection) { C->HasSelection = false; C->Dirty = true; }
+
+            // --- Ctrl+click opens the http/https/file link under the pointer ---
+            if(Button == 0 && (W & MK_CONTROL) && Cy >= 0 && Cy < C->GridH && Cx >= 0 && Cx < C->GridW)
+            {
+                const cell* Row = C->Grid.data() + (size_t)Cy * C->GridW;
+                auto Stop = [](u32 Cp) { return Cp <= ' ' || (Cp < 0x80 && strchr("<>\"'`|", (int)Cp)); };
+                s32 X0 = Cx;
+                s32 X1 = Cx;
+                while(X0 > 0 && !Stop(Row[X0 - 1].Codepoint)) { X0 -= 1; }
+                while(X1 + 1 < C->GridW && !Stop(Row[X1 + 1].Codepoint)) { X1 += 1; }
+                std::string Link;
+                for(s32 X = X0; X <= X1; ++X) { if(!(Row[X].Flags & CELL_WIDE_CONT) && !Stop(Row[X].Codepoint)) { AppendUtf8(Link, Row[X].Codepoint); } }
+                while(!Link.empty() && strchr(".,;:!?)]}", Link.back())) { Link.pop_back(); }
+                if(Link.compare(0, 7, "http://") == 0 || Link.compare(0, 8, "https://") == 0 || Link.compare(0, 7, "file://") == 0)
+                {
+                    std::wstring Wide(Link.size() + 1, 0);
+                    Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Link.data(), (int)Link.size(), &Wide[0], (int)Wide.size()));
+                    ShellExecuteW(Window, L"open", Wide.c_str(), 0, 0, SW_SHOWNORMAL);
+                    return 0;
+                }
+            }
+
+            // --- selection: a plain drag when no program has the mouse, Shift+drag always; it stays
+            // inside the pane it starts in ---
+            if(Button == 0 && (C->MouseMode == 0 || (W & MK_SHIFT)))
+            {
+                for(s32 P = 0; P < C->PaneCount; ++P)
+                {
+                    const s32* R = C->Panes[P];
+                    if(Cx < R[0] || Cx >= R[0] + R[2] || Cy < R[1] || Cy >= R[1] + R[3]) { continue; }
+                    memcpy(C->SelPane, R, sizeof(C->SelPane));
+                    C->Selecting = true;
+                    C->SelAx = C->SelBx = Cx;
+                    C->SelAy = C->SelBy = Cy;
+                    SetCapture(Window);
+                }
+                return 0;
+            }
             SetCapture(Window);
             C->MouseHeld = Button + 1;
             MouseReport(*C, Button, L, false);
@@ -502,12 +659,27 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         {
             s32 Button = (Msg == WM_LBUTTONUP) ? 0 : (Msg == WM_MBUTTONUP ? 1 : 2);
             ReleaseCapture();
+            if(C->Selecting && Button == 0) { C->Selecting = false; return 0; }
             C->MouseHeld = 0;
             MouseReport(*C, Button, L, true);
             return 0;
         }
         case WM_MOUSEMOVE:
         {
+            if(C->Selecting)
+            {
+                // The moving end follows the pointer, held inside the selection's pane.
+                s32 Cx = Clamp(GET_X_LPARAM(L) / Max(C->F.CellW, 1), C->SelPane[0], C->SelPane[0] + C->SelPane[2] - 1);
+                s32 Cy = Clamp(GET_Y_LPARAM(L) / Max(C->F.CellH, 1), C->SelPane[1], C->SelPane[1] + C->SelPane[3] - 1);
+                if(Cx != C->SelBx || Cy != C->SelBy)
+                {
+                    C->SelBx = Cx;
+                    C->SelBy = Cy;
+                    C->HasSelection = C->HasSelection || Cx != C->SelAx || Cy != C->SelAy; // a click alone selects nothing
+                    C->Dirty = true;
+                }
+                return 0;
+            }
             if(C->MouseHeld) { MouseReport(*C, (C->MouseHeld - 1) | 32, L, false); }
             else if(C->MouseMode == 1003) { MouseReport(*C, 3 | 32, L, false); }
             return 0;
@@ -611,7 +783,9 @@ static int WindowMain(s32 JumpToTab)
     while(!C.Quit)
     {
         HANDLE Waits[1] = {Server.ReadEvent};
-        MsgWaitForMultipleObjectsEx(1, Waits, 30000, QS_ALLINPUT, MWMO_INPUTAVAILABLE); // wakes for keep-active too
+        // Wakes for keep-active too, and often enough to blink a blinking cursor.
+        DWORD Timeout = ((C.CursorShape & 1) && !C.CursorHidden) ? 100 : 30000;
+        MsgWaitForMultipleObjectsEx(1, Waits, Timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         MSG Msg = {};
         while(PeekMessageW(&Msg, 0, 0, 0, PM_REMOVE))
         {
@@ -621,6 +795,45 @@ static int WindowMain(s32 JumpToTab)
                 bool32 Shift = GetKeyState(VK_SHIFT) < 0;
                 bool32 Ctrl = GetKeyState(VK_CONTROL) < 0;
                 bool32 Alt = GetKeyState(VK_MENU) < 0;
+                bool32 Modifier = Msg.wParam == VK_SHIFT || Msg.wParam == VK_CONTROL || Msg.wParam == VK_MENU;
+                if(!Modifier)
+                {
+                    C.BlinkOff = false; // typing shows a blinking cursor at once
+                    C.BlinkAtMs = GetTickCount64();
+                }
+
+                // --- copy: Ctrl+C with a selection (without one it stays ^C for the program), or
+                // Ctrl+Shift+C. Rows are clipped to the selection's pane, trailing blanks dropped ---
+                if(Msg.wParam == 'C' && Ctrl && !Alt && (Shift || C.HasSelection))
+                {
+                    if(C.HasSelection)
+                    {
+                        s32 Sx = 0, Sy = 0, Ex = 0, Ey = 0;
+                        SelectionRange(C, &Sx, &Sy, &Ex, &Ey);
+                        std::string Text;
+                        for(s32 Y = Max(Sy, 0); Y <= Ey && Y < C.GridH; ++Y)
+                        {
+                            s32 X0 = (Y == Sy) ? Sx : C.SelPane[0];
+                            s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
+                            std::string Line;
+                            for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X)
+                            {
+                                const cell& K = C.Grid[(size_t)Y * C.GridW + X];
+                                if(K.Flags & CELL_WIDE_CONT) { continue; }
+                                AppendUtf8(Line, K.Codepoint >= 0x20 ? K.Codepoint : ' ');
+                            }
+                            while(!Line.empty() && Line.back() == ' ') { Line.pop_back(); }
+                            Text += Line;
+                            if(Y < Ey) { Text += "\r\n"; }
+                        }
+                        SetClipboardText(C.Window, Text);
+                        C.HasSelection = false;
+                        C.Dirty = true;
+                    }
+                    continue;
+                }
+                if(C.HasSelection && !Modifier) { C.HasSelection = false; C.Dirty = true; } // typing ends a selection
+
                 // --- paste: Ctrl+Shift+V or Shift+Insert, as a bracketed paste with CR line ends ---
                 if((Msg.wParam == 'V' && Ctrl && Shift) || (Msg.wParam == VK_INSERT && Shift && !Ctrl))
                 {

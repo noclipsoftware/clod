@@ -251,8 +251,10 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
         Rows.append((const char*)Row, RowBytes);
         RowCount += 1;
     }
-    bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY;
-    if(!RowCount && !CursorChanged && !TitleChanged) { return false; }
+    bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY ||
+                           Prev.CursorShape != Next.CursorShape;
+    bool32 PanesChanged = Prev.PaneCount != Next.PaneCount || memcmp(Prev.Panes, Next.Panes, sizeof(Next.Panes)) != 0;
+    if(!RowCount && !CursorChanged && !TitleChanged && !PanesChanged) { return false; }
 
     msg_cells H = {};
     H.Width = Next.Width;
@@ -262,6 +264,15 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
     H.Flags = (Full ? CELLS_FULL : 0) | (Next.CursorHidden ? CELLS_CURSOR_HIDDEN : 0);
     H.MouseMode = MouseMode;
     H.PrefixKey = PrefixKey;
+    H.CursorShape = Next.CursorShape;
+    H.PaneCount = Min(Next.PaneCount, 4);
+    for(s32 P = 0; P < H.PaneCount; ++P)
+    {
+        H.Panes[P][0] = Next.Panes[P].X;
+        H.Panes[P][1] = Next.Panes[P].Y;
+        H.Panes[P][2] = Next.Panes[P].W;
+        H.Panes[P][3] = Next.Panes[P].H;
+    }
     H.TitleLen = (u32)Title.size();
     H.RowCount = RowCount;
     Out.append((const char*)&H, sizeof(H));
@@ -379,10 +390,14 @@ static void StartListening(HANDLE Listen, OVERLAPPED& Ov, HANDLE Event)
 
 static void LaunchClientWindow(s32 JumpToTab)
 {
-    // A plain new-console launch is what Windows hands to the user's default terminal app.
+    // clod's own window when it's installed next to us; else a plain new-console launch, which
+    // Windows hands to the user's default terminal app.
     wchar_t Exe[MAX_PATH] = {};
     GetModuleFileNameW(0, Exe, MAX_PATH);
-    std::wstring Cmd = std::wstring(L"\"") + Exe + L"\"";
+    std::wstring Window = Exe;
+    Window = Window.substr(0, Window.find_last_of(L'\\') + 1) + L"clodw.exe";
+    bool32 Own = GetFileAttributesW(Window.c_str()) != INVALID_FILE_ATTRIBUTES;
+    std::wstring Cmd = std::wstring(L"\"") + (Own ? Window : std::wstring(Exe)) + L"\"";
     if(JumpToTab) { Cmd += L" --tab " + std::to_wstring(JumpToTab - 1); }
     wchar_t Home[MAX_PATH] = {};
     GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);

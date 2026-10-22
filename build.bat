@@ -48,7 +48,7 @@ rem --- clodw.exe: clod's own window (Direct3D 11 + DirectWrite), same move-asid
 del /q clodw.old-*.exe >nul 2>nul
 if exist clodw.exe del /q clodw.exe >nul 2>nul
 if exist clodw.exe move /y clodw.exe clodw.old-%RANDOM%.exe >nul
-cl %FLAGS% %OPT% "%ROOT%code\clodw.cpp" clod.res /Fe:clodw.exe /link /INCREMENTAL:NO /OPT:REF /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib d3d11.lib dxgi.lib d3dcompiler.lib d2d1.lib dwrite.lib comdlg32.lib
+cl %FLAGS% %OPT% "%ROOT%code\clodw.cpp" clod.res /Fe:clodw.exe /link /INCREMENTAL:NO /OPT:REF /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib d3d11.lib dxgi.lib d3dcompiler.lib d2d1.lib dwrite.lib comdlg32.lib imm32.lib
 set ERR=%errorlevel%
 
 :done

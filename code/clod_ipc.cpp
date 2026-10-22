@@ -21,7 +21,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a client from another build is turned away
 // with a clear message instead of misreading the stream.
-#define CLOD_PROTOCOL_VERSION 2
+#define CLOD_PROTOCOL_VERSION 3
 
 struct msg_attach
 {
@@ -48,6 +48,9 @@ struct msg_cells
     u32 Flags;     // CELLS_*
     s32 MouseMode; // what to report: 0 = nothing (capture off), 1002 = clicks and drags, 1003 = all motion
     u32 PrefixKey; // the control byte that starts a clod command, for the client's own shortcuts
+    s32 CursorShape; // DECSCUSR value (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
+    s32 PaneCount;   // pane rectangles {x, y, w, h} in cells: a selection stays inside its pane
+    s32 Panes[4][4];
     u32 TitleLen;
     u32 RowCount;
 };

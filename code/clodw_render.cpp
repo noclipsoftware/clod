@@ -19,6 +19,8 @@ enum
     GPU_UNDERLINE = 1 << 0,
     GPU_STRIKE    = 1 << 1,
     GPU_COLOR     = 1 << 2, // the tile holds its own colors (emoji): draw them instead of tinting with Fg
+    GPU_CURSOR_UNDER = 1 << 3, // underline cursor across this cell
+    GPU_CURSOR_BAR   = 1 << 4, // bar cursor at this cell's left edge
 };
 
 // Matches cbuffer Consts in the shader.
@@ -32,6 +34,8 @@ struct alignas(16) gpu_consts
     u32 UnderlineY;
     u32 StrikeY;
     u32 LineH;
+    u32 CursorThick; // underline / bar cursor thickness in pixels
+    u32 Pad[3];
 };
 
 #define ATLAS_SIZE 2048
@@ -70,6 +74,7 @@ cbuffer Consts : register(b0)
 {
     uint CellW; uint CellH; uint GridW; uint GridH;
     uint MarginColor; uint UnderlineY; uint StrikeY; uint LineH;
+    uint CursorThick; uint Pad0; uint Pad1; uint Pad2;
 };
 StructuredBuffer<Cell> Cells : register(t0);
 Texture2D<float4> Atlas : register(t1);
@@ -98,7 +103,9 @@ float4 PsMain(float4 Pos : SV_Position) : SV_Target
     float3 Out = Ink + Bg * (1 - T.a);
     bool Under = (K.Flags & 1) && In.y >= UnderlineY && In.y < UnderlineY + LineH;
     bool Strike = (K.Flags & 2) && In.y >= StrikeY && In.y < StrikeY + LineH;
-    if(Under || Strike) { Out = Fg; }
+    bool CursorUnder = (K.Flags & 8) && In.y + CursorThick >= CellH;
+    bool CursorBar = (K.Flags & 16) && In.x < CursorThick;
+    if(Under || Strike || CursorUnder || CursorBar) { Out = Fg; }
     return float4(Out, 1);
 }
 )";

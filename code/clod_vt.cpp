@@ -40,6 +40,7 @@ struct vt_terminal
     bool32 SavedOriginMode;
 
     bool32 CursorHidden;
+    s32 CursorShape; // DECSCUSR: 0 default, 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
     bool32 AutowrapOff;
     bool32 OriginMode;
     bool32 InsertMode;
@@ -469,6 +470,7 @@ static void VtCsiDispatch(vt_terminal& T, char Final)
             T.ScrollTop = 0;
             T.ScrollBottomInset = 0;
         }
+        if(T.Intermediate == ' ' && Final == 'q') { T.CursorShape = Clamp(T.ParamCount ? T.Params[0] : 0, 0, 6); } // DECSCUSR
         return;
     }
 

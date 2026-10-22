@@ -937,6 +937,9 @@ struct frame
     s32 CursorX;
     s32 CursorY;
     bool32 CursorHidden;
+    s32 CursorShape;             // DECSCUSR value of the program owning the cursor (0 = default)
+    s32 PaneCount;               // the panes' rectangles, so a window can keep a selection inside one
+    pane_rect Panes[MAX_PANES];
 };
 
 static cell Style(u32 Fg, u32 Bg, u16 Attr)
@@ -991,6 +994,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     F.Height = H;
     F.Cells.assign((size_t)Max(W, 0) * Max(H, 0), cell{});
     F.CursorHidden = true;
+    F.CursorShape = 0;
+    F.PaneCount = 0;
     Hits.clear();
     if(W <= 0 || H <= 0) { return; }
 
@@ -1123,8 +1128,10 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     }
 
     // --- panes: each draws its tab, or the sessions page, inside its own rectangle ---
+    F.PaneCount = PaneCount(App.Layout);
     for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
     {
+        F.Panes[Pane] = PaneRect(App, Pane);
         pane_rect PR = PaneRect(App, Pane);
         const tab* PaneTab = App.PaneTab[Pane];
         bool32 Focused = (Pane == App.Focus);
@@ -1168,6 +1175,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                T.CursorY < PR.H && T.CursorX < PW)
             {
                 F.CursorHidden = false;
+                F.CursorShape = T.CursorShape;
                 F.CursorX = Left + T.CursorX;
                 F.CursorY = Top + T.CursorY;
             }
@@ -1479,12 +1487,18 @@ static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next
         }
     }
 
-    bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY;
+    bool32 ShapeChanged = Full || Prev.CursorShape != Next.CursorShape;
+    bool32 CursorChanged = ShapeChanged || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY;
     if(Body.empty() && !CursorChanged) { return false; }
 
     Out += "\x1b[?2026h\x1b[?25l";
     Out += Body;
     Out += "\x1b[0m";
+    if(ShapeChanged)
+    {
+        snprintf(Buf, sizeof(Buf), "\x1b[%d q", Next.CursorShape);
+        Out += Buf;
+    }
     if(!Next.CursorHidden)
     {
         snprintf(Buf, sizeof(Buf), "\x1b[%d;%dH\x1b[?25h", Next.CursorY + 1, Next.CursorX + 1);

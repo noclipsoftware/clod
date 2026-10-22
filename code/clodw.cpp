@@ -23,6 +23,7 @@
 #include <d2d1.h>
 #include <dwrite_2.h>
 #include <commdlg.h>
+#include <imm.h>
 
 #include "clod_base.h"
 #include "clod_ipc.cpp"
