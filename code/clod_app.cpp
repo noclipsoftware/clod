@@ -22,7 +22,6 @@ struct tab
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     u64 NotifiedAtMs;       // last tray notification about this tab
-    std::string LastCommand; // shells: the last command cmd's title showed running (the idle tab's name)
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
     std::string HistorySaved; // what that file holds, to skip rewriting it unchanged
     bool32 ReplayHistory;   // restored after a restart: cmd types the saved output before its prompt
@@ -909,7 +908,7 @@ static std::string RunningCommand(const std::string& Title)
 static std::string TabName(const tab& Tab)
 {
     // A shell: cmd titles itself "<path>\cmd.exe - <command>" while a command runs, and just its exe
-    // path at the prompt. Show the running command, else the last one it ran, else the folder; a
+    // path at the prompt. Show the running command, else the folder it's in (it follows cd); a
     // title some program set itself (title, vim) shows as is. All behind a prompt mark, the way
     // claude's own titles start with its ✳.
     if(Tab.SessionId.empty())
@@ -918,7 +917,6 @@ static std::string TabName(const tab& Tab)
         if(!Tab.Term.Title.empty() && ToLower(Tab.Term.Title).find("cmd.exe") == std::string::npos) { return Mark + Tab.Term.Title; }
         std::string Running = RunningCommand(Tab.Term.Title);
         if(!Running.empty()) { return Mark + Running; }
-        if(!Tab.LastCommand.empty()) { return Mark + Tab.LastCommand; }
         return Mark + (!Tab.Project.empty() ? Tab.Project : Tab.Cwd);
     }
     std::string Fallback = !Tab.Title.empty() ? Tab.Title : (!Tab.Project.empty() ? Tab.Project : "claude");

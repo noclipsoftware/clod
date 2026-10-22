@@ -973,9 +973,6 @@ static int ServerMain()
             {
                 bool32 WasSync = T->Term.SyncOutput;
                 VtFeed(T->Term, (const u8*)Chunk.data(), Chunk.size());
-                // A shell remembers the command its title shows running: the tab's name once idle.
-                std::string Running = RunningCommand(T->Term.Title);
-                if(T->SessionId.empty() && !Running.empty()) { T->LastCommand = Running; }
                 Chunk.clear();
                 PtyWrite(T->Pty, T->Term.Reply);
                 T->Term.Reply.clear();
