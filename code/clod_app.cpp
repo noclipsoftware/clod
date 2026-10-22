@@ -910,14 +910,16 @@ static std::string TabName(const tab& Tab)
 {
     // A shell: cmd titles itself "<path>\cmd.exe - <command>" while a command runs, and just its exe
     // path at the prompt. Show the running command, else the last one it ran, else the folder; a
-    // title some program set itself (title, vim, claude) shows as is.
+    // title some program set itself (title, vim) shows as is. All behind a prompt mark, the way
+    // claude's own titles start with its ✳.
     if(Tab.SessionId.empty())
     {
-        if(!Tab.Term.Title.empty() && ToLower(Tab.Term.Title).find("cmd.exe") == std::string::npos) { return Tab.Term.Title; }
+        const char* Mark = "❯ "; // ❯
+        if(!Tab.Term.Title.empty() && ToLower(Tab.Term.Title).find("cmd.exe") == std::string::npos) { return Mark + Tab.Term.Title; }
         std::string Running = RunningCommand(Tab.Term.Title);
-        if(!Running.empty()) { return Running; }
-        if(!Tab.LastCommand.empty()) { return Tab.LastCommand; }
-        return "cmd " + (!Tab.Project.empty() ? Tab.Project : Tab.Cwd);
+        if(!Running.empty()) { return Mark + Running; }
+        if(!Tab.LastCommand.empty()) { return Mark + Tab.LastCommand; }
+        return Mark + (!Tab.Project.empty() ? Tab.Project : Tab.Cwd);
     }
     std::string Fallback = !Tab.Title.empty() ? Tab.Title : (!Tab.Project.empty() ? Tab.Project : "claude");
     std::string Name = Tab.Term.Title;
