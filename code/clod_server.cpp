@@ -49,6 +49,33 @@ static std::wstring UserClodDir()
     return std::wstring(Home) + L"\\.clod\\";
 }
 
+// Where a tab's recent output is kept across server restarts: %LOCALAPPDATA%\clod\history\<id>.txt.
+static std::wstring HistoryPath(const std::string& Id)
+{
+    wchar_t Base[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", Base, MAX_PATH);
+    return std::wstring(Base) + L"\\clod\\history" + InstanceSuffix() + L"\\" + Utf8ToWide(Id) + L".txt"; // per instance
+}
+
+// Saves a shell tab's last lines of output for the next server to show (claude tabs come back by
+// --resume instead, so theirs is dropped). UTF-16 with a BOM: cmd's `type` prints that right in
+// any code page.
+static void SaveHistory(tab& T)
+{
+    std::string Text = T.SessionId.empty() ? HistoryText(T.Term, 200) : std::string();
+    if(Text == T.HistorySaved) { return; }
+    T.HistorySaved = Text;
+    std::wstring Path = HistoryPath(T.HistoryId);
+    if(Text.empty()) { DeleteFileW(Path.c_str()); return; }
+    CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
+    std::wstring Wide = L"\xFEFF" + Utf8ToWide(Text);
+    HANDLE File = CreateFileW(Path.c_str(), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+    if(File == INVALID_HANDLE_VALUE) { return; }
+    DWORD Written = 0;
+    WriteFile(File, Wide.data(), (DWORD)(Wide.size() * sizeof(wchar_t)), &Written, 0);
+    CloseHandle(File);
+}
+
 // (Re)starts a tab's cmd, running the user's init.bat. With a SessionId, cmd then runs claude:
 // resuming when the session file exists, otherwise claiming the id. Claude exiting leaves the shell.
 static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_state& App, u64 NowMs)
@@ -79,7 +106,14 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
     std::wstring ClodDir = UserClodDir();
     std::wstring Inner;
     std::wstring Init = ClodDir + L"init.bat";
-    if(GetFileAttributesW(Init.c_str()) != INVALID_FILE_ATTRIBUTES) { Inner = L"call \"" + Init + L"\""; }
+    // A shell back after a restart first shows its saved output, above the new prompt.
+    std::wstring History = HistoryPath(Tab.HistoryId);
+    if(Tab.ReplayHistory && Tab.SessionId.empty() && GetFileAttributesW(History.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        Inner = L"type \"" + History + L"\"";
+    }
+    Tab.ReplayHistory = false;
+    if(GetFileAttributesW(Init.c_str()) != INVALID_FILE_ATTRIBUTES) { Inner += (Inner.empty() ? L"" : L" & ") + std::wstring(L"call \"") + Init + L"\""; }
     std::wstring Clink = ExeDir() + L"clink\\clink_x64.exe";
     if(GetFileAttributesW(Clink.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
@@ -140,7 +174,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
 }
 
 // Shell: a plain cmd. Otherwise claude runs in it, with SessionId or a brand new one.
-static tab* OpenTab(app_state& App, bool32 Shell, const std::string& SessionId, const std::string& Cwd, const std::string& Project, const std::string& Title,
+static tab* OpenTab(app_state& App, bool32 Shell, const std::string& SessionId, const std::string& HistoryId, const std::string& Cwd, const std::string& Project, const std::string& Title,
                     HANDLE Job, HANDLE Wake, u64 NowMs)
 {
     tab* T = new tab();
@@ -148,7 +182,11 @@ static tab* OpenTab(app_state& App, bool32 Shell, const std::string& SessionId, 
     T->Cwd = Cwd;
     T->Project = Project;
     T->Title = Title;
-    StartTab(*T, App.Width, ContentRows(App.Height), Job, Wake, App, NowMs);
+    // A shell restored after a restart shows its saved output again (when there is any).
+    T->HistoryId = HistoryId.empty() ? NewUuid() : HistoryId;
+    T->ReplayHistory = !HistoryId.empty();
+    pane_rect R = PaneRect(App, App.Focus); // it opens in the focused pane
+    StartTab(*T, R.W, R.H, Job, Wake, App, NowMs);
     App.Tabs.push_back(T);
     return T;
 }
@@ -157,12 +195,56 @@ static void CloseTab(app_state& App, tab* T)
 {
     auto It = std::find(App.Tabs.begin(), App.Tabs.end(), T);
     if(It == App.Tabs.end()) { return; }
-    s32 Index = (s32)(It - App.Tabs.begin()) + 1;
+    ForgetTab(App, T); // its pane takes the next tab nothing shows
+    DeleteFileW(HistoryPath(T->HistoryId).c_str()); // a closed tab's output isn't coming back
     PtyClose(T->Pty);
     delete T;
     App.Tabs.erase(It);
-    if(App.Active > Index) { App.Active -= 1; } // keep showing the same tab
-    App.Active = Min(App.Active, (s32)App.Tabs.size());
+    App.Active = TabIndex(App, App.PaneTab[App.Focus]);
+}
+
+// The prefix key from settings.txt ("prefix = ctrl+\"), or Ctrl+\ when unset or unusable.
+static u32 LoadPrefixKey()
+{
+    s32 Key = PrefixFromName(ReadSetting("prefix"));
+    return Key >= 0 ? (u32)Key : 0x1C;
+}
+
+// A frame for a client that draws cells itself (clodw): the rows that differ from Prev, or all of
+// them when Full, plus cursor, title and the mouse reporting it should do. Returns false when there
+// is nothing to send.
+static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next, bool32 Full, s32 MouseMode, u32 PrefixKey,
+                          const std::string& Title, bool32 TitleChanged)
+{
+    if(Prev.Width != Next.Width || Prev.Height != Next.Height || Prev.Cells.size() != Next.Cells.size()) { Full = true; }
+    std::string Rows;
+    u32 RowCount = 0;
+    size_t RowBytes = (size_t)Next.Width * sizeof(cell);
+    for(s32 Y = 0; Y < Next.Height; ++Y)
+    {
+        const cell* Row = Next.Cells.data() + (size_t)Y * Next.Width;
+        if(!Full && memcmp(Row, Prev.Cells.data() + (size_t)Y * Next.Width, RowBytes) == 0) { continue; }
+        Rows.append((const char*)&Y, sizeof(Y));
+        Rows.append((const char*)Row, RowBytes);
+        RowCount += 1;
+    }
+    bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY;
+    if(!RowCount && !CursorChanged && !TitleChanged) { return false; }
+
+    msg_cells H = {};
+    H.Width = Next.Width;
+    H.Height = Next.Height;
+    H.CursorX = Next.CursorX;
+    H.CursorY = Next.CursorY;
+    H.Flags = (Full ? CELLS_FULL : 0) | (Next.CursorHidden ? CELLS_CURSOR_HIDDEN : 0);
+    H.MouseMode = MouseMode;
+    H.PrefixKey = PrefixKey;
+    H.TitleLen = (u32)Title.size();
+    H.RowCount = RowCount;
+    Out.append((const char*)&H, sizeof(H));
+    Out += Title;
+    Out += Rows;
+    return true;
 }
 
 // A path typed in the folder prompt, made absolute: drops quotes, expands ~, resolves relative
@@ -199,10 +281,16 @@ static std::wstring TabsFilePath()
 
 static std::string TabsFileContents(const app_state& App)
 {
+    // Also the layout, focus and what each pane shows (tab numbers, 0 = sessions page), and the
+    // layout each monitor last used.
     std::string Out = "active\t" + std::to_string(App.Active) + "\n";
+    Out += "layout\t" + std::to_string(App.Layout) + "\t" + std::to_string(App.Focus);
+    for(s32 P = 0; P < MAX_PANES; ++P) { Out += "\t" + std::to_string(TabIndex(App, App.PaneTab[P])); }
+    Out += "\n";
+    for(const monitor_layout& M : App.MonitorLayouts) { Out += "monitor\t" + std::to_string(M.Layout) + "\t" + M.Monitor + "\n"; }
     for(const tab* T : App.Tabs)
     {
-        std::string Fields[4] = {T->SessionId, T->Cwd, T->Project, T->Title};
+        std::string Fields[4] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title};
         Out += T->SessionId.empty() ? "shell" : "tab";
         for(std::string& F : Fields)
         {
@@ -312,6 +400,7 @@ static int ServerMain()
         GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
         App.LaunchCwd = WideToUtf8(Home);
     }
+    App.PrefixKey = LoadPrefixKey();
     App.Sessions = ScanSessions();
 
     // --- first run (no ~\.clod\init.bat): give the user their own copy of the default shell setup ---
@@ -353,6 +442,7 @@ static int ServerMain()
     {
         std::string Saved = ReadTabsFile();
         s32 SavedActive = 0;
+        std::vector<std::string> SavedLayout;
         size_t At = 0;
         while(At < Saved.size())
         {
@@ -361,18 +451,52 @@ static int ServerMain()
             std::vector<std::string> F = SplitTabs(Saved.substr(At, End - At));
             At = End + 1;
             if(F.size() >= 2 && F[0] == "active") { SavedActive = atoi(F[1].c_str()); }
+            if(F.size() >= 3 + MAX_PANES && F[0] == "layout") { SavedLayout = F; }
+            if(F.size() >= 3 && F[0] == "monitor") { App.MonitorLayouts.push_back(monitor_layout{F[2], Clamp(atoi(F[1].c_str()), 0, LAYOUT_MAIN)}); }
             // A claude tab resumes its session. A shell can't be resumed; it comes back as a fresh
             // one in the same folder, as does a claude that never got a prompt (no session file).
             if(F.size() >= 5 && (F[0] == "tab" || F[0] == "shell"))
             {
                 bool32 Claude = (F[0] == "tab" && SessionFileExists(F[1]));
-                OpenTab(App, !Claude, F[1], F[2], F[3], Claude ? F[4] : std::string(), Job, Wake, GetTickCount64());
+                OpenTab(App, !Claude, F[1], Claude ? std::string() : F[1], F[2], F[3], Claude ? F[4] : std::string(), Job, Wake, GetTickCount64());
             }
         }
-        App.Active = Clamp(SavedActive, 0, (s32)App.Tabs.size());
+        // --- the saved layout, with each pane's tab when that tab came back (else the sessions page) ---
+        if(!SavedLayout.empty())
+        {
+            App.Layout = Clamp(atoi(SavedLayout[1].c_str()), 0, LAYOUT_MAIN);
+            for(s32 P = 0; P < PaneCount(App.Layout); ++P)
+            {
+                s32 Index = atoi(SavedLayout[3 + P].c_str());
+                tab* T = (Index > 0 && Index <= (s32)App.Tabs.size()) ? App.Tabs[Index - 1] : 0;
+                App.PaneTab[P] = (PaneShowing(App, T) < 0) ? T : 0;
+            }
+            FocusPane(App, atoi(SavedLayout[2].c_str()));
+        }
+        else
+        {
+            SwitchTab(App, Clamp(SavedActive, 0, (s32)App.Tabs.size()));
+        }
     }
     std::string SavedTabs = TabsFileContents(App);
     if(!Ephemeral) { WriteTabsFile(SavedTabs); }
+
+    // --- saved output of tabs that aren't coming back ---
+    if(!Ephemeral)
+    {
+        std::wstring Dir = HistoryPath("*");
+        Dir = Dir.substr(0, Dir.find_last_of(L'\\') + 1);
+        WIN32_FIND_DATAW Found = {};
+        HANDLE Find = FindFirstFileW((Dir + L"*.txt").c_str(), &Found);
+        while(Find != INVALID_HANDLE_VALUE)
+        {
+            std::wstring Name = Found.cFileName;
+            bool32 Kept = false;
+            for(tab* T : App.Tabs) { if(Utf8ToWide(T->HistoryId) + L".txt" == Name) { Kept = true; } }
+            if(!Kept) { DeleteFileW((Dir + Name).c_str()); }
+            if(!FindNextFileW(Find, &Found)) { FindClose(Find); break; }
+        }
+    }
 
     frame Prev = {};
     frame Next = {};
@@ -384,8 +508,10 @@ static int ServerMain()
     u64 SyncSinceMs = 0;        // when the active child began a synchronized update
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
     u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
+    u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
     std::string OuterTitle;
     std::vector<u32> OuterWide;  // sorted codepoints the attached console draws 2 cells wide where CharWidth says 1
+    bool32 ClientCells = false;  // the attached client is clodw: it gets MSG_CELLS instead of VT
     s32 OuterMouse = -1;        // mouse tracking mode currently requested from the client's terminal
     tab* FocusedTab = 0;        // compared by address only; may dangle after a close
     std::string TrayTip;
@@ -471,11 +597,13 @@ static int ServerMain()
                     msg_attach A = {};
                     memcpy(&A, Payload.data(), sizeof(A));
                     App.LaunchCwd = Payload.substr(sizeof(A));
+                    App.PrefixKey = LoadPrefixKey(); // settings.txt may have changed since
                     App.Width = Max(A.Width, 1);
                     App.Height = Max(A.Height, 2);
                     if(A.JumpToTab) { SwitchTab(App, A.JumpToTab - 1); }
                     App.Sessions = ScanSessions();
                     ClientWindow = (HWND)(uintptr_t)A.ConsoleWindow;
+                    ClientCells = (A.Flags & ATTACH_CELLS) != 0;
                     Attached = true;
                     LaunchedWindowAtMs = 0;
                     // A fresh terminal: assume nothing about what it shows or which modes it has.
@@ -485,6 +613,16 @@ static int ServerMain()
                     OuterWide.clear();
                     ForceFull = true;
                     ResizeAtMs = NowMs;
+                    Dirty = true;
+                }
+                else if(Type == MSG_MONITOR && Attached && Payload != App.Monitor)
+                {
+                    // The window is on another monitor: use the layout that monitor last had.
+                    App.Monitor = Payload;
+                    for(const monitor_layout& M : App.MonitorLayouts)
+                    {
+                        if(M.Monitor == App.Monitor && M.Layout != App.Layout) { SetLayout(App, M.Layout); }
+                    }
                     Dirty = true;
                 }
                 else if(Type == MSG_WIDTHS && Attached)
@@ -538,12 +676,12 @@ static int ServerMain()
                 case CMD_WRITE: PtyWrite(C.Tab->Pty, C.Bytes); break;
                 case CMD_OPEN:
                 {
-                    OpenTab(App, false, C.SessionId, C.Cwd, C.Project, C.Title, Job, Wake, NowMs);
+                    OpenTab(App, false, C.SessionId, std::string(), C.Cwd, C.Project, C.Title, Job, Wake, NowMs);
                     SwitchTab(App, (s32)App.Tabs.size());
                 } break;
                 case CMD_OPEN_SHELL:
                 {
-                    OpenTab(App, true, std::string(), C.Cwd, ProjectName(C.Cwd), std::string(), Job, Wake, NowMs);
+                    OpenTab(App, true, std::string(), std::string(), C.Cwd, ProjectName(C.Cwd), std::string(), Job, Wake, NowMs);
                     SwitchTab(App, (s32)App.Tabs.size());
                 } break;
                 case CMD_OPEN_FOLDER:
@@ -561,7 +699,7 @@ static int ServerMain()
                     }
                     App.Prompt = PROMPT_NONE;
                     App.PathInput.clear();
-                    OpenTab(App, false, std::string(), Cwd, ProjectName(Cwd), std::string(), Job, Wake, NowMs);
+                    OpenTab(App, false, std::string(), std::string(), Cwd, ProjectName(Cwd), std::string(), Job, Wake, NowMs);
                     SwitchTab(App, (s32)App.Tabs.size());
                 } break;
                 case CMD_COMPLETE_FOLDER:
@@ -611,7 +749,7 @@ static int ServerMain()
                 {
                     PtyClose(C.Tab->Pty);
                     C.Tab->Pty = 0;
-                    StartTab(*C.Tab, App.Width, ContentRows(App.Height), Job, Wake, App, NowMs);
+                    StartTab(*C.Tab, Max(C.Tab->Term.Cols, 1), Max(C.Tab->Term.Rows, 1), Job, Wake, App, NowMs);
                 } break;
                 case CMD_CLOSE: CloseTab(App, C.Tab); break;
                 case CMD_RESCAN:
@@ -655,13 +793,16 @@ static int ServerMain()
             {
                 bool32 WasSync = T->Term.SyncOutput;
                 VtFeed(T->Term, (const u8*)Chunk.data(), Chunk.size());
+                // A shell remembers the command its title shows running: the tab's name once idle.
+                std::string Running = RunningCommand(T->Term.Title);
+                if(T->SessionId.empty() && !Running.empty()) { T->LastCommand = Running; }
                 Chunk.clear();
                 PtyWrite(T->Pty, T->Term.Reply);
                 T->Term.Reply.clear();
                 ToClient += T->Term.PassThrough;
                 T->Term.PassThrough.clear();
                 TabSyncScroll(*T);
-                if(T != ActiveTab(App)) { T->Activity = true; }
+                if(PaneShowing(App, T) < 0) { T->Activity = true; } // off screen: mark it in the tab bar
                 if(T == ActiveTab(App) && T->Term.SyncOutput && !WasSync) { SyncSinceMs = NowMs; }
                 Dirty = true;
 
@@ -691,7 +832,7 @@ static int ServerMain()
                 Ended.push_back(T);
             }
 
-            bool32 Unseen = !Attached || T != ActiveTab(App);
+            bool32 Unseen = !Attached || PaneShowing(App, T) < 0;
             if(!Why.empty() && Unseen && NowMs - T->NotifiedAtMs > 10000)
             {
                 TrayNotify(Tray, TabName(*T), Why, I + 1);
@@ -775,20 +916,28 @@ static int ServerMain()
             FocusedTab = NowFocused;
         }
 
-        // --- resize children once the window has been still for a moment ---
-        if(ResizeAtMs && NowMs - ResizeAtMs >= 60)
+        // --- child sizes: a tab on screen matches its pane (layout and pane changes apply at once);
+        // after the window has been still for a moment, tabs off screen take the focused pane's size,
+        // where they'd appear next ---
+        bool32 Settled = ResizeAtMs && NowMs - ResizeAtMs >= 60;
+        if(!ResizeAtMs || Settled)
         {
             ResizeAtMs = 0;
+            pane_rect FocusRect = PaneRect(App, App.Focus);
             for(tab* T : App.Tabs)
             {
-                VtResize(T->Term, App.Width, ContentRows(App.Height));
+                s32 Pane = PaneShowing(App, T);
+                if(Pane < 0 && !Settled) { continue; }
+                pane_rect R = (Pane >= 0) ? PaneRect(App, Pane) : FocusRect;
+                if(T->Term.Cols == R.W && T->Term.Rows == R.H) { continue; }
+                VtResize(T->Term, R.W, R.H);
                 if(T->Pty)
                 {
-                    COORD Size = {(SHORT)Max(App.Width, 1), (SHORT)ContentRows(App.Height)};
+                    COORD Size = {(SHORT)R.W, (SHORT)R.H};
                     ResizePseudoConsole(T->Pty->Console, Size);
                 }
+                Dirty = true;
             }
-            Dirty = true;
         }
 
         // --- tray tooltip and the restore file follow the tab set ---
@@ -799,6 +948,11 @@ static int ServerMain()
             TrayTip = Tip;
         }
         std::string Tabs = TabsFileContents(App);
+        if(!Ephemeral && NowMs - HistorySavedMs >= 30000)
+        {
+            for(tab* T : App.Tabs) { SaveHistory(*T); } // also covers a crash or reboot
+            HistorySavedMs = NowMs;
+        }
         if(Tabs != SavedTabs && !Ephemeral)
         {
             WriteTabsFile(Tabs);
@@ -818,21 +972,28 @@ static int ServerMain()
             OutBytes.clear();
             // Track motion only when the active child wants hover events; otherwise clicks, drags and wheel.
             s32 WantMouse = App.MouseCaptureOff ? 0 : ((Active && Active->Term.MouseMode == 1003) ? 1003 : 1002);
-            if(WantMouse != OuterMouse)
-            {
-                OutBytes += "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l";
-                if(WantMouse) { OutBytes += "\x1b[?1000h\x1b[?" + std::to_string(WantMouse) + "h\x1b[?1006h"; }
-                OuterMouse = WantMouse;
-            }
             std::string Name = Ephemeral ? "clod TEST" : "clod";
             std::string Title = Active ? Name + " - " + TabName(*Active) : Name;
-            if(Title != OuterTitle)
+            bool32 HeaderChanged = (WantMouse != OuterMouse || Title != OuterTitle);
+            if(ClientCells)
             {
-                OutBytes += "\x1b]0;" + Title + "\x07";
-                OuterTitle = Title;
+                // clodw draws the cells itself: no VT, no width guessing.
+                if(EncodeCells(OutBytes, Prev, Next, ForceFull, WantMouse, App.PrefixKey, Title, HeaderChanged) &&
+                   !IpcSendString(Client, MSG_CELLS, OutBytes)) { IpcClose(Client); Attached = false; }
             }
-            RenderFrame(OutBytes, Prev, Next, ForceFull, OuterWide);
-            if(!OutBytes.empty() && !IpcSendString(Client, MSG_OUTPUT, OutBytes)) { IpcClose(Client); Attached = false; }
+            else
+            {
+                if(WantMouse != OuterMouse)
+                {
+                    OutBytes += "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l";
+                    if(WantMouse) { OutBytes += "\x1b[?1000h\x1b[?" + std::to_string(WantMouse) + "h\x1b[?1006h"; }
+                }
+                if(Title != OuterTitle) { OutBytes += "\x1b]0;" + Title + "\x07"; }
+                RenderFrame(OutBytes, Prev, Next, ForceFull, OuterWide);
+                if(!OutBytes.empty() && !IpcSendString(Client, MSG_OUTPUT, OutBytes)) { IpcClose(Client); Attached = false; }
+            }
+            OuterMouse = WantMouse;
+            OuterTitle = Title;
             std::swap(Prev, Next);
             ForceFull = false;
             Dirty = false;
@@ -843,7 +1004,9 @@ static int ServerMain()
     }
 
     // --- shutdown: tell the window, then hang up every child at once so they exit in parallel ---
-    // The tab list is left on disk on purpose: the next launch reopens every tab with --resume.
+    // The tab list is left on disk on purpose: the next launch reopens every tab with --resume,
+    // and shell tabs show their saved output again.
+    if(!Ephemeral) { for(tab* T : App.Tabs) { SaveHistory(*T); } }
     std::string Count = std::to_string(App.Tabs.size()) + " tab" + (App.Tabs.size() == 1 ? "" : "s");
     DropClient(Client, Ephemeral ? "test instance ended" : "clod quit from the tray; " + Count + " will reopen the next time you run clod");
     if(!Ephemeral) { TrayDestroy(Tray); }

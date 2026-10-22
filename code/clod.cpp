@@ -26,6 +26,7 @@
 #include "clod_app.cpp"
 #include "clod_pty.cpp"
 #include "clod_ipc.cpp"
+#include "clod_settings.cpp"
 #include "clod_tray.cpp"
 #include "clod_server.cpp"
 #include "clod_client.cpp"

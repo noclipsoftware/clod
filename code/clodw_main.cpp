@@ -1,0 +1,647 @@
+// clodw's window: attaches to the clod server as a cells client, draws the grid the server composes,
+// and turns keyboard and mouse input into the VT bytes a terminal would send. No text layout happens
+// here beyond drawing each cell's glyph: the server's grid is the truth, so nothing can drift.
+
+struct clodw
+{
+    HWND Window;
+    renderer R;
+    font_state F;
+    glyph_cache G;
+    ipc_conn* Server;
+    std::wstring FontFamily;
+    float FontPt;
+    u32 Dpi;
+
+    // --- the grid as the server last sent it ---
+    s32 GridW;
+    s32 GridH;
+    std::vector<cell> Grid;
+    s32 CursorX;
+    s32 CursorY;
+    bool32 CursorHidden;
+    s32 MouseMode;
+    u32 PrefixKey;   // the server's command prefix, for the direct shortcuts
+    std::string Title;
+
+    std::string InBytes;   // input not yet sent
+    bool32 Dirty;          // the window needs a redraw
+    s32 SentW;             // size last told to the server, in cells
+    s32 SentH;
+    std::string Monitor;   // monitor last told to the server (each keeps its own layout)
+    wchar_t HighSurrogate; // first half of a WM_CHAR surrogate pair
+    s32 MouseHeld;         // SGR button number + 1 while a button is down; 0 = none
+    s32 MouseX;            // last reported cell, 1-based
+    s32 MouseY;
+    s32 WheelAccum;
+    bool32 Quit;
+    bool32 KeepActiveOff;  // settings "keep_active = off": don't hold off Windows' idle (Slack's away)
+    bool32 Keeping;        // keeping the user active right now (the bar's light shows it)
+    std::string ByeReason;
+    std::vector<gpu_cell> Gpu;
+};
+
+static const u32 DefaultFg = 204 | (204 << 8) | (204 << 16);
+static const u32 DefaultBg = 12 | (12 << 8) | (12 << 16);
+
+// Packs 0xRRGGBB-style components as the shader reads them (0x00BBGGRR).
+static u32 PackRgb(u32 R, u32 G, u32 B) { return R | (G << 8) | (B << 16); }
+
+// A cell color (clod_base.h tags) as a packed RGB; untagged = the default.
+static u32 ResolveColor(u32 C, u32 Default)
+{
+    if(COLOR_TAG(C) == COLOR_RGB) { return PackRgb((C >> 16) & 255, (C >> 8) & 255, C & 255); }
+    if(COLOR_TAG(C) != COLOR_PALETTE) { return Default; }
+    u32 I = C & 255;
+    static const u32 Base[16][3] = {
+        {12, 12, 12}, {197, 15, 31}, {19, 161, 14}, {193, 156, 0}, {0, 55, 218}, {136, 23, 152}, {58, 150, 221}, {204, 204, 204},
+        {118, 118, 118}, {231, 72, 86}, {22, 198, 12}, {249, 241, 165}, {59, 120, 255}, {180, 0, 158}, {97, 214, 214}, {242, 242, 242},
+    };
+    if(I < 16) { return PackRgb(Base[I][0], Base[I][1], Base[I][2]); }
+    if(I < 232)
+    {
+        static const u32 Level[6] = {0, 95, 135, 175, 215, 255};
+        u32 N = I - 16;
+        return PackRgb(Level[N / 36], Level[(N / 6) % 6], Level[N % 6]);
+    }
+    u32 Gray = 8 + 10 * (I - 232);
+    return PackRgb(Gray, Gray, Gray);
+}
+
+#define IDM_FONT 0x0100 // window menu command (system menu ids keep the low 4 bits clear)
+
+// Font size in pixels at the window's DPI; resets the glyph atlas.
+static void ApplyFont(clodw& C)
+{
+    FontSetup(C.F, C.G, C.R, C.FontFamily, C.FontPt * (float)C.Dpi / 72.0f);
+    C.Dirty = true;
+}
+
+// One round of work: send input and size, apply what the server sent, redraw if anything changed.
+// Runs from the main loop, and from a timer while Windows holds the thread in a move/resize loop.
+static void Tick(clodw& C)
+{
+    // --- size in cells follows the client area ---
+    RECT Client = {};
+    GetClientRect(C.Window, &Client);
+    s32 Cols = Max(1, (s32)(Client.right - Client.left) / C.F.CellW);
+    s32 Rows = Max(2, (s32)(Client.bottom - Client.top) / C.F.CellH);
+    if((Client.right > 0 && Client.bottom > 0) && (Cols != C.SentW || Rows != C.SentH))
+    {
+        s32 Size[2] = {Cols, Rows};
+        if(!IpcSend(*C.Server, MSG_RESIZE, Size, sizeof(Size))) { C.Quit = true; }
+        C.SentW = Cols;
+        C.SentH = Rows;
+    }
+    std::string Monitor = MonitorKey(C.Window);
+    if(Monitor != C.Monitor)
+    {
+        if(!IpcSendString(*C.Server, MSG_MONITOR, Monitor)) { C.Quit = true; }
+        C.Monitor = Monitor;
+    }
+    if(!C.InBytes.empty())
+    {
+        if(!IpcSendString(*C.Server, MSG_INPUT, C.InBytes)) { C.Quit = true; }
+        C.InBytes.clear();
+    }
+
+    // --- server messages ---
+    bool32 Alive = IpcPump(*C.Server);
+    u32 Type = 0;
+    std::string Payload;
+    while(IpcNextMessage(*C.Server, Type, Payload))
+    {
+        if(Type == MSG_CELLS && Payload.size() >= sizeof(msg_cells))
+        {
+            msg_cells H = {};
+            memcpy(&H, Payload.data(), sizeof(H));
+            size_t At = sizeof(H);
+            std::string Title = Payload.substr(At, H.TitleLen);
+            At += H.TitleLen;
+            if((H.Flags & CELLS_FULL) || H.Width != C.GridW || H.Height != C.GridH)
+            {
+                C.GridW = H.Width;
+                C.GridH = H.Height;
+                C.Grid.assign((size_t)Max(H.Width, 0) * Max(H.Height, 0), cell{});
+            }
+            size_t RowBytes = (size_t)C.GridW * sizeof(cell);
+            for(u32 I = 0; I < H.RowCount && At + sizeof(s32) + RowBytes <= Payload.size(); ++I)
+            {
+                s32 Y = 0;
+                memcpy(&Y, Payload.data() + At, sizeof(Y));
+                At += sizeof(Y);
+                if(Y >= 0 && Y < C.GridH) { memcpy(C.Grid.data() + (size_t)Y * C.GridW, Payload.data() + At, RowBytes); }
+                At += RowBytes;
+            }
+            C.CursorX = H.CursorX;
+            C.CursorY = H.CursorY;
+            C.CursorHidden = (H.Flags & CELLS_CURSOR_HIDDEN) != 0;
+            C.MouseMode = H.MouseMode;
+            C.PrefixKey = H.PrefixKey;
+            if(Title != C.Title)
+            {
+                C.Title = Title;
+                std::wstring Wide(Title.size() + 1, 0);
+                Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Title.data(), (int)Title.size(), &Wide[0], (int)Wide.size()));
+                SetWindowTextW(C.Window, Wide.c_str());
+            }
+            C.Dirty = true;
+        }
+        else if(Type == MSG_OUTPUT)
+        {
+            // Pass-through bytes meant for a terminal: only the bell matters to a window.
+            if(Payload.find('\x07') != std::string::npos && GetForegroundWindow() != C.Window)
+            {
+                FLASHWINFO Flash = {sizeof(Flash), C.Window, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
+                FlashWindowEx(&Flash);
+            }
+        }
+        else if(Type == MSG_BYE)
+        {
+            C.ByeReason = Payload;
+            C.Quit = true;
+        }
+    }
+    if(!Alive && !C.Quit)
+    {
+        C.ByeReason = "lost connection to the clod server";
+        C.Quit = true;
+    }
+
+    // --- keep active: while this window is in front, Windows' idle timer (what Slack's "away"
+    // goes by) never reaches its limit; a one-pixel nudge and back resets it. Nothing happens when
+    // the machine is locked or another window is in front ---
+    bool32 Keeping = !C.KeepActiveOff && GetForegroundWindow() == C.Window;
+    if(Keeping)
+    {
+        LASTINPUTINFO Last = {sizeof(Last), 0};
+        GetLastInputInfo(&Last);
+        if(GetTickCount() - Last.dwTime > 2 * 60 * 1000)
+        {
+            INPUT Nudge[2] = {};
+            Nudge[0].type = INPUT_MOUSE;
+            Nudge[0].mi.dx = 1;
+            Nudge[0].mi.dwFlags = MOUSEEVENTF_MOVE;
+            Nudge[1] = Nudge[0];
+            Nudge[1].mi.dx = -1;
+            SendInput(2, Nudge, sizeof(INPUT));
+        }
+    }
+    if(Keeping != C.Keeping) { C.Keeping = Keeping; C.Dirty = true; }
+
+    if(!C.Dirty || C.Grid.empty() || C.Quit) { return; }
+    C.Dirty = false;
+
+    // --- the grid as GPU cells: colors resolved, glyph tiles looked up (drawn on first use) ---
+    // A full atlas empties the glyph cache and the pass runs again.
+    size_t N = C.Grid.size();
+    C.Gpu.assign(N, gpu_cell{});
+    for(s32 Pass = 0; Pass < 2; ++Pass)
+    {
+        bool32 AtlasFull = false;
+        for(s32 Y = 0; Y < C.GridH && !AtlasFull; ++Y)
+        {
+            for(s32 X = 0; X < C.GridW && !AtlasFull; ++X)
+            {
+                size_t I = (size_t)Y * C.GridW + X;
+                const cell& K = C.Grid[I];
+                u32 Fg = ResolveColor(K.Fg, DefaultFg);
+                u32 Bg = ResolveColor(K.Bg, DefaultBg);
+                if(K.Attr & ATTR_INVERSE) { u32 T = Fg; Fg = Bg; Bg = T; }
+                if(K.Attr & ATTR_DIM) { Fg = (Fg >> 1) & 0x7F7F7F; }
+                u32 Flags = ((K.Attr & ATTR_UNDERLINE) ? GPU_UNDERLINE : 0) | ((K.Attr & ATTR_STRIKE) ? GPU_STRIKE : 0);
+                bool32 Wide = (K.Flags & CELL_WIDE) && X + 1 < C.GridW;
+                u32 Cp = K.Codepoint;
+                // Blanks, controls, orphaned second halves, hidden text, and (until clusters are drawn
+                // whole) the marks and joiners that would combine with a neighbour.
+                bool32 Blank = Cp <= ' ' || (K.Flags & CELL_WIDE_CONT) || (K.Attr & ATTR_HIDDEN) || IsClusterExtender(Cp) ||
+                               ((K.Flags & CELL_WIDE) && !Wide);
+                u32 Tile = 0;
+                bool32 Color = false;
+                if(!Blank)
+                {
+                    u32 Style = ((K.Attr & ATTR_BOLD) ? STYLE_BOLD : 0) | ((K.Attr & ATTR_ITALIC) ? STYLE_ITALIC : 0);
+                    if(!GlyphLookup(C.G, C.F, C.R, &Cp, 1, Style, Wide ? 2 : 1, &Tile, &Color)) { AtlasFull = true; break; }
+                }
+                if(Color) { Flags |= GPU_COLOR; }
+                C.Gpu[I] = gpu_cell{Tile, Fg, Bg, Flags};
+                if(Wide)
+                {
+                    C.Gpu[I + 1] = gpu_cell{Tile ? Tile + 1 : 0, Fg, Bg, Flags};
+                    X += 1;
+                }
+            }
+        }
+        if(!AtlasFull) { break; }
+        GlyphCacheReset(C.G);
+    }
+
+    // --- the keep-active light, in the bar's last cell (the server leaves it blank): green while
+    // this window keeps the user active, grey otherwise ---
+    if(!C.KeepActiveOff && C.GridW > 0 && C.GridH > 0)
+    {
+        u32 Dot = 0x25CF; // ●
+        u32 Tile = 0;
+        bool32 Color = false;
+        size_t I = (size_t)C.GridH * C.GridW - 1;
+        if(GlyphLookup(C.G, C.F, C.R, &Dot, 1, 0, 1, &Tile, &Color))
+        {
+            C.Gpu[I].Tile = Tile;
+            C.Gpu[I].Fg = C.Keeping ? PackRgb(90, 210, 110) : PackRgb(100, 100, 100);
+        }
+    }
+
+    // --- block cursor: the cell (both halves of a wide one) with its colors swapped ---
+    if(!C.CursorHidden && C.CursorX >= 0 && C.CursorX < C.GridW && C.CursorY >= 0 && C.CursorY < C.GridH)
+    {
+        size_t I = (size_t)C.CursorY * C.GridW + C.CursorX;
+        size_t Count = (C.Grid[I].Flags & CELL_WIDE) && C.CursorX + 1 < C.GridW ? 2 : 1;
+        for(size_t K = I; K < I + Count; ++K)
+        {
+            u32 T = C.Gpu[K].Fg;
+            C.Gpu[K].Fg = C.Gpu[K].Bg;
+            C.Gpu[K].Bg = T;
+        }
+    }
+
+    gpu_consts Consts = {};
+    Consts.CellW = (u32)C.F.CellW;
+    Consts.CellH = (u32)C.F.CellH;
+    Consts.GridW = (u32)C.GridW;
+    Consts.GridH = (u32)C.GridH;
+    Consts.MarginColor = DefaultBg;
+    Consts.UnderlineY = (u32)C.F.UnderlineY;
+    Consts.StrikeY = (u32)C.F.StrikeY;
+    Consts.LineH = (u32)C.F.LineH;
+    if(!RendererDraw(C.R, C.Gpu, Consts))
+    {
+        // --- device lost: start the GPU side over; the next tick redraws everything ---
+        for(IDWriteTextFormat*& Format : C.F.Formats) { ReleaseCom(Format); }
+        RendererRelease(C.R);
+        if(!RendererCreate(C.R, C.Window)) { C.Quit = true; return; }
+        ApplyFont(C);
+    }
+}
+
+// Keys that don't arrive as WM_CHAR text, as the VT sequences Windows Terminal sends. Empty = not
+// special: let TranslateMessage turn it into characters.
+static std::string SpecialKey(WPARAM Vk, bool32 Shift, bool32 Ctrl, bool32 Alt)
+{
+    s32 Mod = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0);
+    char Buf[32] = {};
+    char Final = 0;
+    s32 Tilde = 0;
+    switch(Vk)
+    {
+        case VK_UP: Final = 'A'; break;
+        case VK_DOWN: Final = 'B'; break;
+        case VK_RIGHT: Final = 'C'; break;
+        case VK_LEFT: Final = 'D'; break;
+        case VK_HOME: Final = 'H'; break;
+        case VK_END: Final = 'F'; break;
+        case VK_F1: Final = 'P'; break;
+        case VK_F2: Final = 'Q'; break;
+        case VK_F3: Final = 'R'; break;
+        case VK_F4: if(Alt) { return std::string(); } Final = 'S'; break; // Alt+F4 closes the window
+        case VK_INSERT: Tilde = 2; break;
+        case VK_DELETE: Tilde = 3; break;
+        case VK_PRIOR: Tilde = 5; break;
+        case VK_NEXT: Tilde = 6; break;
+        case VK_F5: Tilde = 15; break;
+        case VK_F6: Tilde = 17; break;
+        case VK_F7: Tilde = 18; break;
+        case VK_F8: Tilde = 19; break;
+        case VK_F9: Tilde = 20; break;
+        case VK_F10: Tilde = 21; break;
+        case VK_F11: Tilde = 23; break;
+        case VK_F12: Tilde = 24; break;
+        case VK_TAB: return Shift ? std::string("\x1b[Z") : std::string();
+        case VK_RETURN: return Shift ? std::string("\x1b\r") : std::string(); // Shift+Enter: a newline in claude's prompt
+        case VK_BACK: return Ctrl ? std::string("\x08") : (Alt ? std::string("\x1b\x7f") : std::string("\x7f"));
+        case VK_ESCAPE: return std::string("\x1b");
+        case VK_SPACE: return Ctrl ? std::string(1, '\0') : std::string();
+        default: return std::string();
+    }
+    if(Final >= 'P' && Final <= 'S') { snprintf(Buf, sizeof(Buf), Mod > 1 ? "\x1b[1;%d%c" : "\x1bO%c", Mod > 1 ? Mod : Final, Final); }
+    else if(Final) { snprintf(Buf, sizeof(Buf), Mod > 1 ? "\x1b[1;%d%c" : "\x1b[%c", Mod > 1 ? Mod : Final, Final); }
+    else { snprintf(Buf, sizeof(Buf), Mod > 1 ? "\x1b[%d;%d~" : "\x1b[%d~", Tilde, Mod); }
+    return Buf;
+}
+
+// Mouse event as an SGR report, if the server wants this kind of event right now.
+static void MouseReport(clodw& C, s32 Button, LPARAM Pos, bool32 Release)
+{
+    if(!C.MouseMode || C.F.CellW <= 0) { return; }
+    s32 X = Clamp(GET_X_LPARAM(Pos) / C.F.CellW + 1, 1, Max(C.GridW, 1));
+    s32 Y = Clamp(GET_Y_LPARAM(Pos) / C.F.CellH + 1, 1, Max(C.GridH, 1));
+    bool32 Motion = (Button & 32) != 0;
+    if(Motion && X == C.MouseX && Y == C.MouseY) { return; }
+    if(GetKeyState(VK_SHIFT) < 0) { Button |= 4; }
+    if(GetKeyState(VK_MENU) < 0) { Button |= 8; }
+    if(GetKeyState(VK_CONTROL) < 0) { Button |= 16; }
+    char Buf[48];
+    snprintf(Buf, sizeof(Buf), "\x1b[<%d;%d;%d%c", Button, X, Y, Release ? 'm' : 'M');
+    C.InBytes += Buf;
+    C.MouseX = X;
+    C.MouseY = Y;
+}
+
+static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM L)
+{
+    if(Msg == WM_NCCREATE) { SetWindowLongPtrW(Window, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)L)->lpCreateParams); }
+    clodw* C = (clodw*)GetWindowLongPtrW(Window, GWLP_USERDATA);
+    if(!C) { return DefWindowProcW(Window, Msg, W, L); }
+    switch(Msg)
+    {
+        case WM_CLOSE: C->Quit = true; return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT Ps = {};
+            BeginPaint(Window, &Ps);
+            EndPaint(Window, &Ps);
+            C->Dirty = true;
+            return 0;
+        }
+        case WM_SIZE: C->Dirty = true; return 0;
+
+        // --- move/resize: Windows runs its own loop, so tick from a timer meanwhile ---
+        case WM_ENTERSIZEMOVE: SetTimer(Window, 1, 16, 0); return 0;
+        case WM_EXITSIZEMOVE: KillTimer(Window, 1); return 0;
+        case WM_TIMER: Tick(*C); return 0;
+
+        case WM_DPICHANGED:
+        {
+            C->Dpi = HIWORD(W);
+            ApplyFont(*C);
+            RECT* Suggested = (RECT*)L;
+            SetWindowPos(Window, 0, Suggested->left, Suggested->top, Suggested->right - Suggested->left,
+                         Suggested->bottom - Suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+
+        // --- text: WM_CHAR units to UTF-8; Alt+key arrives as WM_SYSCHAR and gets an ESC prefix ---
+        case WM_CHAR:
+        case WM_SYSCHAR:
+        {
+            wchar_t U = (wchar_t)W;
+            if(Msg == WM_SYSCHAR && U == ' ') { break; } // Alt+Space: the window menu
+            if(U >= 0xD800 && U <= 0xDBFF) { C->HighSurrogate = U; return 0; }
+            u32 Cp = U;
+            if(U >= 0xDC00 && U <= 0xDFFF && C->HighSurrogate) { Cp = 0x10000 + ((C->HighSurrogate - 0xD800) << 10) + (U - 0xDC00); }
+            C->HighSurrogate = 0;
+            if(Msg == WM_SYSCHAR) { C->InBytes += '\x1b'; }
+            AppendUtf8(C->InBytes, Cp);
+            return 0;
+        }
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+            // Alt combinations are input, not the menu bar; Alt+F4 and Alt+Space (window menu) keep their meaning.
+            if((W == VK_F4 || W == VK_SPACE) && Msg == WM_SYSKEYDOWN) { break; }
+            return 0;
+
+        // --- Font... in the window menu: any installed font; applied now and saved to settings.txt ---
+        case WM_SYSCOMMAND:
+        {
+            if((W & 0xFFF0) != IDM_FONT) { break; }
+            LOGFONTW Lf = {};
+            wcsncpy_s(Lf.lfFaceName, C->FontFamily.c_str(), _TRUNCATE);
+            HDC Dc = GetDC(Window);
+            Lf.lfHeight = -MulDiv((int)(C->FontPt * 10.0f + 0.5f), GetDeviceCaps(Dc, LOGPIXELSY), 720);
+            ReleaseDC(Window, Dc);
+            CHOOSEFONTW Cf = {};
+            Cf.lStructSize = sizeof(Cf);
+            Cf.hwndOwner = Window;
+            Cf.lpLogFont = &Lf;
+            Cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOSTYLESEL | CF_NOSCRIPTSEL;
+            if(!ChooseFontW(&Cf)) { return 0; }
+            C->FontFamily = Lf.lfFaceName;
+            C->FontPt = Max(Cf.iPointSize, 10) / 10.0f;
+            ApplyFont(*C);
+
+            // Keep the file's other lines; replace the font ones.
+            std::string Kept;
+            FILE* File = 0;
+            _wfopen_s(&File, SettingsPath().c_str(), L"rb");
+            char Line[512];
+            while(File && fgets(Line, sizeof(Line), File))
+            {
+                std::string Key = Line;
+                Key = Key.substr(0, Key.find('='));
+                while(!Key.empty() && strchr(" \t\r\n", Key.back())) { Key.pop_back(); }
+                if(Key != "font" && Key != "font_size") { Kept += Line; }
+            }
+            if(File) { fclose(File); }
+            if(!Kept.empty() && Kept.back() != '\n') { Kept += "\r\n"; }
+            char Face[LF_FACESIZE * 3] = {};
+            WideCharToMultiByte(CP_UTF8, 0, Lf.lfFaceName, -1, Face, sizeof(Face), 0, 0);
+            char Size[32];
+            snprintf(Size, sizeof(Size), "%g", C->FontPt);
+            Kept += std::string("font = ") + Face + "\r\nfont_size = " + Size + "\r\n";
+            std::wstring Path = SettingsPath();
+            CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
+            _wfopen_s(&File, Path.c_str(), L"wb");
+            if(File) { fwrite(Kept.data(), 1, Kept.size(), File); fclose(File); }
+            return 0;
+        }
+
+        case WM_SETFOCUS: C->InBytes += "\x1b[I"; C->Dirty = true; return 0;  // Dirty: the keep-active light
+        case WM_KILLFOCUS: C->InBytes += "\x1b[O"; C->Dirty = true; return 0;
+
+        // --- mouse, reported the way the server asked for (MouseMode) ---
+        case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONDOWN:
+        {
+            s32 Button = (Msg == WM_LBUTTONDOWN) ? 0 : (Msg == WM_MBUTTONDOWN ? 1 : 2);
+            SetCapture(Window);
+            C->MouseHeld = Button + 1;
+            MouseReport(*C, Button, L, false);
+            return 0;
+        }
+        case WM_LBUTTONUP: case WM_MBUTTONUP: case WM_RBUTTONUP:
+        {
+            s32 Button = (Msg == WM_LBUTTONUP) ? 0 : (Msg == WM_MBUTTONUP ? 1 : 2);
+            ReleaseCapture();
+            C->MouseHeld = 0;
+            MouseReport(*C, Button, L, true);
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+        {
+            if(C->MouseHeld) { MouseReport(*C, (C->MouseHeld - 1) | 32, L, false); }
+            else if(C->MouseMode == 1003) { MouseReport(*C, 3 | 32, L, false); }
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            POINT P = {GET_X_LPARAM(L), GET_Y_LPARAM(L)};
+            ScreenToClient(Window, &P);
+            C->WheelAccum += GET_WHEEL_DELTA_WPARAM(W);
+            while(C->WheelAccum >= WHEEL_DELTA || C->WheelAccum <= -WHEEL_DELTA)
+            {
+                bool32 Up = C->WheelAccum > 0;
+                C->WheelAccum += Up ? -WHEEL_DELTA : WHEEL_DELTA;
+                C->MouseX = 0; // a wheel report is never a duplicate
+                MouseReport(*C, Up ? 64 : 65, MAKELPARAM(P.x, P.y), false);
+            }
+            return 0;
+        }
+    }
+    return DefWindowProcW(Window, Msg, W, L);
+}
+
+static int WindowMain(s32 JumpToTab)
+{
+    static clodw C = {};
+    C.FontFamily = L"Cascadia Mono";
+    C.FontPt = 12.0f;
+    C.KeepActiveOff = (ReadSetting("keep_active") == "off");
+
+    // --- settings ---
+    std::string Font = ReadSetting("font");
+    if(!Font.empty())
+    {
+        std::wstring Wide(Font.size() + 1, 0);
+        Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Font.data(), (int)Font.size(), &Wide[0], (int)Wide.size()));
+        C.FontFamily = Wide;
+    }
+    float Size = (float)atof(ReadSetting("font_size").c_str());
+    if(Size > 0) { C.FontPt = Size; }
+
+    // --- window, renderer and font; sized to 120x36 cells at the monitor's DPI ---
+    HINSTANCE Instance = GetModuleHandleW(0);
+    WNDCLASSW Class = {};
+    Class.lpfnWndProc = ClodwWindowProc;
+    Class.hInstance = Instance;
+    Class.hIcon = LoadIconW(Instance, MAKEINTRESOURCEW(1));
+    Class.hCursor = LoadCursorW(0, MAKEINTRESOURCEW(32512)); // IDC_ARROW
+    Class.lpszClassName = L"clodw";
+    RegisterClassW(&Class);
+    DWORD Style = WS_OVERLAPPEDWINDOW;
+    C.Window = CreateWindowExW(0, L"clodw", L"clod", Style, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, 0, 0, Instance, &C);
+    if(!C.Window || !RendererCreate(C.R, C.Window)) { return 1; }
+    HMENU WindowMenu = GetSystemMenu(C.Window, FALSE);
+    AppendMenuW(WindowMenu, MF_SEPARATOR, 0, 0);
+    AppendMenuW(WindowMenu, MF_STRING, IDM_FONT, L"Font...");
+    C.Dpi = GetDpiForWindow(C.Window);
+    ApplyFont(C);
+    RECT Want = {0, 0, 120 * C.F.CellW, 36 * C.F.CellH};
+    AdjustWindowRectExForDpi(&Want, Style, FALSE, 0, C.Dpi);
+    SetWindowPos(C.Window, 0, 0, 0, Want.right - Want.left, Want.bottom - Want.top, SWP_NOMOVE | SWP_NOZORDER);
+    ShowWindow(C.Window, SW_SHOWNORMAL);
+
+    // --- connect (starting clod.exe --server from this folder if needed) and attach for cells ---
+    wchar_t Self[MAX_PATH] = {};
+    GetModuleFileNameW(0, Self, MAX_PATH);
+    std::wstring ServerExe = Self;
+    ServerExe = ServerExe.substr(0, ServerExe.find_last_of(L'\\') + 1) + L"clod.exe";
+    std::string Error;
+    HANDLE Pipe = ConnectToServer(ServerExe, Error);
+    if(!Pipe)
+    {
+        MessageBoxA(C.Window, Error.c_str(), "clod", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    static ipc_conn Server = {};
+    IpcInit(Server, Pipe);
+    C.Server = &Server;
+    {
+        RECT Client = {};
+        GetClientRect(C.Window, &Client);
+        msg_attach A = {};
+        A.Width = Max(1, (s32)Client.right / C.F.CellW);
+        A.Height = Max(2, (s32)Client.bottom / C.F.CellH);
+        A.JumpToTab = JumpToTab;
+        A.ConsoleWindow = (u64)(uintptr_t)C.Window;
+        A.Flags = ATTACH_CELLS;
+        C.SentW = A.Width;
+        C.SentH = A.Height;
+        wchar_t Cwd[MAX_PATH] = {};
+        GetCurrentDirectoryW(MAX_PATH, Cwd);
+        char Cwd8[MAX_PATH * 3] = {};
+        WideCharToMultiByte(CP_UTF8, 0, Cwd, -1, Cwd8, sizeof(Cwd8), 0, 0);
+        std::string Payload((const char*)&A, sizeof(A));
+        Payload += Cwd8;
+        IpcSendString(Server, MSG_ATTACH, Payload);
+    }
+    IpcPump(Server);
+
+    // --- loop: wait for the server or the window, then tick ---
+    while(!C.Quit)
+    {
+        HANDLE Waits[1] = {Server.ReadEvent};
+        MsgWaitForMultipleObjectsEx(1, Waits, 30000, QS_ALLINPUT, MWMO_INPUTAVAILABLE); // wakes for keep-active too
+        MSG Msg = {};
+        while(PeekMessageW(&Msg, 0, 0, 0, PM_REMOVE))
+        {
+            if(Msg.message == WM_QUIT) { C.Quit = true; break; }
+            if(Msg.message == WM_KEYDOWN || Msg.message == WM_SYSKEYDOWN)
+            {
+                bool32 Shift = GetKeyState(VK_SHIFT) < 0;
+                bool32 Ctrl = GetKeyState(VK_CONTROL) < 0;
+                bool32 Alt = GetKeyState(VK_MENU) < 0;
+                // --- paste: Ctrl+Shift+V or Shift+Insert, as a bracketed paste with CR line ends ---
+                if((Msg.wParam == 'V' && Ctrl && Shift) || (Msg.wParam == VK_INSERT && Shift && !Ctrl))
+                {
+                    if(OpenClipboard(C.Window))
+                    {
+                        HANDLE Data = GetClipboardData(CF_UNICODETEXT);
+                        const wchar_t* Text = Data ? (const wchar_t*)GlobalLock(Data) : 0;
+                        if(Text)
+                        {
+                            int Len = WideCharToMultiByte(CP_UTF8, 0, Text, -1, 0, 0, 0, 0);
+                            std::string Utf8(Max(Len, 1), 0);
+                            WideCharToMultiByte(CP_UTF8, 0, Text, -1, &Utf8[0], Len, 0, 0);
+                            Utf8.resize(strlen(Utf8.c_str()));
+                            std::string Paste;
+                            for(size_t I = 0; I < Utf8.size(); ++I)
+                            {
+                                if(Utf8[I] == '\r' && I + 1 < Utf8.size() && Utf8[I + 1] == '\n') { continue; }
+                                Paste += (Utf8[I] == '\n') ? '\r' : Utf8[I];
+                            }
+                            C.InBytes += "\x1b[200~" + Paste + "\x1b[201~";
+                            GlobalUnlock(Data);
+                        }
+                        CloseClipboard();
+                    }
+                    continue;
+                }
+                // --- clod commands without the prefix (only a window can tell Ctrl+Shift+T from Ctrl+T):
+                // sent as the prefix plus the command's key ---
+                char Command = 0;
+                if(Ctrl && !Alt && Msg.wParam == VK_TAB) { Command = Shift ? 'p' : 'n'; }
+                else if(Ctrl && Shift && !Alt)
+                {
+                    switch(Msg.wParam)
+                    {
+                        case 'T': Command = 't'; break; // new shell
+                        case 'N': Command = 'c'; break; // new session in this folder
+                        case 'O': Command = 'o'; break; // new session in a folder you type
+                        case 'S': Command = 's'; break; // sessions page
+                        case 'W': Command = 'x'; break; // close tab (asks y/n)
+                    }
+                }
+                if(Command)
+                {
+                    C.InBytes += (char)C.PrefixKey;
+                    C.InBytes += Command;
+                    continue;
+                }
+                std::string Seq = SpecialKey(Msg.wParam, Shift, Ctrl, Alt);
+                if(!Seq.empty())
+                {
+                    C.InBytes += Seq;
+                    continue; // no TranslateMessage: no WM_CHAR for this key
+                }
+            }
+            TranslateMessage(&Msg);
+            DispatchMessageW(&Msg);
+        }
+        Tick(C);
+    }
+
+    IpcClose(Server);
+    DestroyWindow(C.Window);
+    // Another window took over, or the user detached: nothing to report. A lost server is news.
+    if(C.ByeReason == "lost connection to the clod server") { MessageBoxA(0, C.ByeReason.c_str(), "clod", MB_OK | MB_ICONWARNING); }
+    return 0;
+}

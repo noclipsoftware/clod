@@ -18,12 +18,42 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 - `clod` is a thin client. It relays console input to the server and server output to the
   console over a per-user named pipe (`code/clod_ipc.cpp`). Closing the window only kills the
   client. The first client spawns the server.
+- `clodw.exe` (`code/clodw*.cpp`) is clod's own window, a second kind of client. It attaches
+  with `ATTACH_CELLS` and gets `MSG_CELLS` (the composed cell grid: changed rows, cursor, title,
+  mouse mode; `EncodeCells` in `clod_server.cpp`) instead of VT, so no other terminal re-measures
+  text. It draws with one Direct3D 11 pixel shader over a cell buffer + glyph atlas; glyphs are
+  drawn on first use with Direct2D/DirectWrite (font fallback, color emoji, scaled to fit their
+  cells). Input goes back as VT bytes, so `HandleInput` serves both clients. Font and size: the
+  window menu's Font... (any installed font) or `~\.clod\settings.txt` (`font`, `font_size`).
+  Written from scratch after refterm's technique; refterm is GPL-2.0, so copy none of its code.
 - A second client takes over from the first. The open tab list is persisted in
   `%LOCALAPPDATA%\clod\tabs.txt`, so a crash or reboot reopens tabs with `--resume`. Shell tabs
   come back as a fresh cmd in the folder they started in.
 - `code/clod_app.cpp` is the pure core. Input becomes `app_command`s that the server executes;
   `Compose` turns state into a cell grid; `RenderFrame` diffs two grids into VT bytes.
   Keep OS calls out of it.
+
+## Panes
+
+- The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
+  2x2 grid, main + 2; prefix `z`/`v`/`g`/`b`; Alt+Q / Alt+Shift+Q cycle the focus, prefix
+  arrows move it by direction; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
+  or the sessions page (`PaneTab[]`, null = sessions page); **a tab is never in two panes**.
+  Picking a tab another pane shows (its number, a click) focuses that pane (`SwitchTab`);
+  cycling (Ctrl+PgUp/PgDn, prefix `n`/`p`) skips such tabs and never moves the focus (`CycleTab`). `App.Active` is always the
+  focused pane's tab, so code that uses `ActiveTab` (keys, prompts, the command bar) still works.
+- Changing layout keeps the focused tab on screen and fills new panes with tabs nothing shows
+  (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
+- Each visible tab's terminal and ConPTY are sized to its pane; off-screen tabs take the focused
+  pane's size once a window resize settles. Mouse events go to the pane under the pointer (a drag
+  stays in its pane) in pane-relative coordinates; a click focuses the pane.
+- Layouts are remembered per monitor: clients send `MSG_MONITOR` (`MonitorKey`: device name and
+  resolution) on attach and when the window moves; the server switches to that monitor's last
+  layout. The layout, panes and per-monitor layouts are saved in `tabs.txt`.
+- clodw's keep-active (`keep_active = off` disables): while clodw is the foreground window, it
+  nudges the mouse a pixel and back whenever Windows' idle time passes 2 minutes, so Slack and
+  the like don't go "away". Its light is the bar's last cell (green = keeping active), which the
+  server leaves blank.
 
 ## Tabs: cmd hosting claude
 
@@ -45,6 +75,14 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   Changing a default in `shell/` doesn't reach an existing `~\.clod`; to see it, edit `~\.clod`
   or delete the file plus `init.bat` to reseed. Keep `clink.autoupdate = off` in the default
   `clink_settings`: the binaries are the vendored copy.
+- Shell tabs keep their recent output across a server restart: every 30 s and at shutdown the
+  last 200 lines (`HistoryText`, with colors) go to `%LOCALAPPDATA%\clod\history<instance>\<id>.txt`
+  as UTF-16 with a BOM; a restored shell's cmd chain starts with `type` of that file, so it shows
+  above the new prompt. The id (`tab::HistoryId`) is the shell line's second field in `tabs.txt`.
+  Closing a tab deletes its file; startup deletes files no tab uses.
+- A shell tab is named for what it runs: cmd titles itself `<path>\cmd.exe - <command>` for
+  external programs (`RunningCommand` tidies it and ignores clod's own startup steps), and the
+  tab keeps the last such command (`tab::LastCommand`) once idle; before any, `cmd <folder>`.
 - The server finds claude by session file, not by how it was started: about once a second it walks
   each tab's process tree and reads `<ClaudeConfigDir>\sessions\<pid>.json` (`sessionId`, `cwd`;
   `procStart` is checked against the process creation time). So a `claude` typed in a shell, `-c`,
@@ -57,9 +95,16 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   stops the server but keeps `tabs.txt`. It asks first only if some claude tab is mid-reply
   (`tab::TitleBusy`) or some shell tab is running a program (its cmd has a child process).
   An idle shell at its prompt or an idle claude doesn't count.
-- In the clod window, `q` (sessions page) and `Ctrl+] q` only **detach**. Stop and end-all are
-  not reachable from the window UI. A tab is dropped only by closing it (`Ctrl+] x`) or by `exit`
+- In the clod window, `q` (sessions page) and prefix `q` only **detach**. Stop and end-all are
+  not reachable from the window UI. A tab is dropped only by closing it (prefix `x`) or by `exit`
   in its cmd. Claude exiting returns the tab to its shell.
+- The command prefix is `Ctrl+\` by default (`prefix = ctrl+...` in `~\.clod\settings.txt`, read on
+  server start and each attach; `PrefixFromName`/`PrefixName` in `clod_app.cpp`). Pressing it twice
+  sends the key itself. The command bar lists the prefix commands only while the prefix is armed;
+  otherwise it shows the direct shortcuts as dim grey hints (Ctrl+PgUp/PgDn, Alt+0-9,
+  Shift+PgUp/PgDn, plus clodw's own when `app_state::WindowClient`), dropping whole entries that
+  don't fit. clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W) that it
+  sends as prefix + key, using the `PrefixKey` the server puts in each `MSG_CELLS` header.
 - The top bar shows **only tabs**. Commands, the close-tab prompt, status messages and the
   scroll position all live in the bottom command bar.
 
@@ -114,6 +159,10 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   - Set `CLOD_CLAUDE="cmd.exe /k echo"` for a fake child.
   - If a test server must be killed, pick it by CreationDate (started seconds ago). The user's
     own `--server` is usually running too.
+- clodw: `build\clodw.exe --test` (own throwaway server). Check it by screenshot: PowerShell
+  `PrintWindow(hwnd, dc, 2)` from a **DPI-aware** script (`SetProcessDPIAware`), then read the PNG.
+  Drive it with `PostMessageW` (`WM_CHAR`, `WM_KEYDOWN`, `WM_LBUTTONDOWN`); posted mouse
+  coordinates get DPI-scaled unless the sender is DPI-aware too.
 - When testing with real claude, always end it with `/exit`. Killing claude during startup adds
   strikes to `fullscreenAutoDisabled` in `~/.claude.json`, and Claude then turns its fullscreen
   renderer off machine-wide (`/tui fullscreen` resets it).

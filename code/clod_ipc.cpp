@@ -10,6 +10,13 @@ enum msg_type
     MSG_OUTPUT, // server -> client: VT bytes for the console
     MSG_BYE,    // server -> client: reason text; the client restores its console and exits
     MSG_WIDTHS, // client -> server: sorted u32 codepoints the client's console draws 2 cells wide where CharWidth says 1
+    MSG_CELLS,  // server -> client (ATTACH_CELLS): msg_cells, the UTF-8 title, then RowCount x (s32 Y, cell[Width])
+    MSG_MONITOR, // client -> server: which monitor the window is on (MonitorKey); each monitor keeps its layout
+};
+
+enum
+{
+    ATTACH_CELLS = 1, // the client draws cells itself (clodw.exe) instead of taking VT output
 };
 
 struct msg_attach
@@ -18,6 +25,26 @@ struct msg_attach
     s32 Height;
     s32 JumpToTab;      // tab index + 1; 0 = stay on the current tab
     u64 ConsoleWindow;  // client's HWND, so the tray can bring it forward
+    u32 Flags;          // ATTACH_*
+};
+
+enum
+{
+    CELLS_FULL          = 1 << 0, // every row follows; the client's grid is resized to Width x Height
+    CELLS_CURSOR_HIDDEN = 1 << 1,
+};
+
+struct msg_cells
+{
+    s32 Width;
+    s32 Height;
+    s32 CursorX;
+    s32 CursorY;
+    u32 Flags;     // CELLS_*
+    s32 MouseMode; // what to report: 0 = nothing (capture off), 1002 = clicks and drags, 1003 = all motion
+    u32 PrefixKey; // the control byte that starts a clod command, for the client's own shortcuts
+    u32 TitleLen;
+    u32 RowCount;
 };
 
 struct ipc_conn
@@ -181,4 +208,65 @@ static bool32 IpcNextMessage(ipc_conn& C, u32& Type, std::string& Payload)
     Payload.assign(C.Inbox, 8, Size);
     C.Inbox.erase(0, 8 + (size_t)Size);
     return true;
+}
+
+// Connects to the running server, starting one (ServerExe --server) if there is none. Returns null
+// on failure. Shared by the console client (clod.exe) and the window (clodw.exe).
+static HANDLE ConnectToServer(const std::wstring& ServerExe, std::string& Error)
+{
+    std::wstring Name = PipeName();
+    bool32 Spawned = false;
+    u64 Deadline = GetTickCount64() + 5000;
+    for(;;)
+    {
+        HANDLE Pipe = CreateFileW(Name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
+        if(Pipe != INVALID_HANDLE_VALUE) { return Pipe; }
+        DWORD Err = GetLastError();
+        if(Err == ERROR_PIPE_BUSY)
+        {
+            WaitNamedPipeW(Name.c_str(), 500);
+        }
+        else if(!Spawned)
+        {
+            // --- start the background server, outside this console and outside any job that would kill it ---
+            std::wstring Cmd = L"\"" + ServerExe + L"\" --server";
+            wchar_t Home[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+            STARTUPINFOW Si = {};
+            Si.cb = sizeof(Si);
+            PROCESS_INFORMATION Pi = {};
+            DWORD Flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+            BOOL Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags | CREATE_BREAKAWAY_FROM_JOB, 0, Home, &Si, &Pi);
+            if(!Ok) { Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags, 0, Home, &Si, &Pi); }
+            if(!Ok)
+            {
+                Error = "could not start the clod server (error " + std::to_string(GetLastError()) + ")";
+                return 0;
+            }
+            CloseHandle(Pi.hThread);
+            CloseHandle(Pi.hProcess);
+            Spawned = true;
+        }
+        else
+        {
+            Sleep(30);
+        }
+        if(GetTickCount64() > Deadline)
+        {
+            Error = "the clod server did not start";
+            return 0;
+        }
+    }
+}
+
+// The monitor Window is on, as "<device> <width>x<height>" (e.g. "\\.\DISPLAY1 3840x2160"), so a
+// laptop screen and a 4K monitor each remember their own layout. Shared by both kinds of client.
+static std::string MonitorKey(HWND Window)
+{
+    MONITORINFOEXA Info = {};
+    Info.cbSize = sizeof(Info);
+    if(!Window || !GetMonitorInfoA(MonitorFromWindow(Window, MONITOR_DEFAULTTONEAREST), &Info)) { return std::string(); }
+    char Buf[96];
+    snprintf(Buf, sizeof(Buf), "%s %dx%d", Info.szDevice, (int)(Info.rcMonitor.right - Info.rcMonitor.left), (int)(Info.rcMonitor.bottom - Info.rcMonitor.top));
+    return Buf;
 }

@@ -30,56 +30,6 @@ static BOOL WINAPI ClientCtrlHandler(DWORD Type)
     return Type == CTRL_C_EVENT || Type == CTRL_BREAK_EVENT;
 }
 
-// Connects to the running server, starting one if there is none. Returns null on failure.
-static HANDLE ConnectToServer(std::string& Error)
-{
-    std::wstring Name = PipeName();
-    bool32 Spawned = false;
-    u64 Deadline = GetTickCount64() + 5000;
-    for(;;)
-    {
-        HANDLE Pipe = CreateFileW(Name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
-        if(Pipe != INVALID_HANDLE_VALUE) { return Pipe; }
-        DWORD Err = GetLastError();
-        if(Err == ERROR_PIPE_BUSY)
-        {
-            WaitNamedPipeW(Name.c_str(), 500);
-        }
-        else if(!Spawned)
-        {
-            // --- start the background server, outside this console and outside any job that would kill it ---
-            wchar_t Exe[MAX_PATH] = {};
-            GetModuleFileNameW(0, Exe, MAX_PATH);
-            std::wstring Cmd = std::wstring(L"\"") + Exe + L"\" --server";
-            wchar_t Home[MAX_PATH] = {};
-            GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
-            STARTUPINFOW Si = {};
-            Si.cb = sizeof(Si);
-            PROCESS_INFORMATION Pi = {};
-            DWORD Flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-            BOOL Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags | CREATE_BREAKAWAY_FROM_JOB, 0, Home, &Si, &Pi);
-            if(!Ok) { Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags, 0, Home, &Si, &Pi); }
-            if(!Ok)
-            {
-                Error = "could not start the clod server (error " + std::to_string(GetLastError()) + ")";
-                return 0;
-            }
-            CloseHandle(Pi.hThread);
-            CloseHandle(Pi.hProcess);
-            Spawned = true;
-        }
-        else
-        {
-            Sleep(30);
-        }
-        if(GetTickCount64() > Deadline)
-        {
-            Error = "the clod server did not start";
-            return 0;
-        }
-    }
-}
-
 static int ClientMain(s32 JumpToTab)
 {
     HANDLE In = GetStdHandle(STD_INPUT_HANDLE);
@@ -92,7 +42,9 @@ static int ClientMain(s32 JumpToTab)
     }
 
     std::string Error;
-    HANDLE Pipe = ConnectToServer(Error);
+    wchar_t Self[MAX_PATH] = {};
+    GetModuleFileNameW(0, Self, MAX_PATH);
+    HANDLE Pipe = ConnectToServer(Self, Error);
     if(!Pipe)
     {
         fprintf(stderr, "clod: %s\n", Error.c_str());
@@ -182,6 +134,7 @@ static int ClientMain(s32 JumpToTab)
     }
 
     std::string Reason = "lost connection to the clod server";
+    std::string Monitor; // last reported to the server
     std::string InBytes;
     u32 Type = 0;
     std::string Payload;
@@ -271,6 +224,15 @@ static int ClientMain(s32 JumpToTab)
                 fflush(Capture);
             }
             if(!IpcSend(Server, MSG_RESIZE, Size, sizeof(Size))) { break; }
+        }
+
+        // --- the monitor (each keeps its own layout); in Windows Terminal the console window is a
+        // hidden placeholder owned by the real window ---
+        std::string NewMonitor = MonitorKey(GetAncestor(GetConsoleWindow(), GA_ROOTOWNER));
+        if(NewMonitor != Monitor)
+        {
+            Monitor = NewMonitor;
+            if(!IpcSendString(Server, MSG_MONITOR, Monitor)) { break; }
         }
     }
 
