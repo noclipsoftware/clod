@@ -7,7 +7,7 @@ side-effects-at-edges); those rules apply here, match them.
 ## What this project is
 
 A Windows terminal tab manager for Claude Code sessions, in C++ (MSVC unity build, `build.bat`).
-Each tab is a real `cmd.exe` (running `~\.clod\init.bat` if it exists) in its own ConPTY, and is a
+Each tab is a real `cmd.exe` (running the repo's `shell\init.bat`, with clink) in its own ConPTY, and is a
 claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites the active one between a tab bar (top row) and a command bar (bottom row), tmux-style.
 It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, Git Bash in WT).
 
@@ -28,14 +28,23 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 ## Tabs: cmd hosting claude
 
 - Opening a session starts
-  `cmd /k "clink inject & init.bat & cd /d <cwd> & claude --resume|--session-id <id>"`, so claude
+  `cmd /k "call init.bat & clink inject & cd /d <cwd> & claude --resume|--session-id <id>"`, so claude
   exiting drops to the shell prompt (Claude Code prints its own `claude --resume <id>` hint).
   `exit` in cmd closes the tab.
 - Clink is vendored unmodified in `vendor/clink` (GPL-3.0, like clod; version and source link in
-  `vendor/clink.SOURCE`). `build.bat` copies it to `build\clink`. Its profile (settings, history)
-  is `%USERPROFILE%\.clod\clink`. Clink loads its DLL from `%TEMP%\clink\dll_cache`, so running
-  tabs never lock `build\clink`. To upgrade, replace `vendor/clink` with a new release zip and
-  update `vendor/clink.SOURCE`.
+  `vendor/clink.SOURCE`). `build.bat` copies it to `build\clink`. Clink loads its DLL from
+  `%TEMP%\clink\dll_cache`, so running tabs never lock `build\clink`. To upgrade, replace
+  `vendor/clink` with a new release zip and update `vendor/clink.SOURCE`.
+- The shell setup belongs to the user and must stay fully editable on their machine. The repo's
+  `shell/` holds only the **defaults**; `build.bat` copies them to `build\shell`. On server start,
+  if `%USERPROFILE%\.clod\init.bat` is missing, every default file missing from `~\.clod` is copied
+  there (never overwriting). Tabs then use only `~\.clod`: `init.bat` (run first, via `call`) and
+  the clink profile `~\.clod\clink` (`inject --profile`), where clink natively reads
+  `clink_settings`, `.inputrc` and Lua scripts and keeps history. Inherited `CLINK_*` variables are
+  dropped so another clink setup can't leak in; `init.bat` can set its own before the inject.
+  Changing a default in `shell/` doesn't reach an existing `~\.clod`; to see it, edit `~\.clod`
+  or delete the file plus `init.bat` to reseed. Keep `clink.autoupdate = off` in the default
+  `clink_settings`: the binaries are the vendored copy.
 - The server finds claude by session file, not by how it was started: about once a second it walks
   each tab's process tree and reads `<ClaudeConfigDir>\sessions\<pid>.json` (`sessionId`, `cwd`;
   `procStart` is checked against the process creation time). So a `claude` typed in a shell, `-c`,

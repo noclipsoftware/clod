@@ -32,6 +32,23 @@ static std::string NewUuid()
     return Buf;
 }
 
+// The folder clod.exe runs from, with a trailing backslash: clink and the default shell setup ship there.
+static std::wstring ExeDir()
+{
+    wchar_t Self[MAX_PATH] = {};
+    GetModuleFileNameW(0, Self, MAX_PATH);
+    std::wstring Dir = Self;
+    return Dir.substr(0, Dir.find_last_of(L'\\') + 1);
+}
+
+// %USERPROFILE%\.clod\, with a trailing backslash: the user's own shell setup and clink profile.
+static std::wstring UserClodDir()
+{
+    wchar_t Home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+    return std::wstring(Home) + L"\\.clod\\";
+}
+
 // (Re)starts a tab's cmd, running the user's init.bat. With a SessionId, cmd then runs claude:
 // resuming when the session file exists, otherwise claiming the id. Claude exiting leaves the shell.
 static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_state& App, u64 NowMs)
@@ -52,25 +69,23 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         Cwd = Utf8ToWide(App.LaunchCwd);
     }
 
-    // --- the command: cmd /k "clink inject & init.bat & cd /d <cwd> & claude ..." ---
+    // --- the command: cmd /k "call init.bat & clink inject & cd /d <cwd> & claude ..." ---
+    // The user's own setup lives in ~\.clod (seeded from clod's defaults on first run): init.bat,
+    // and the clink profile ~\.clod\clink, where clink itself finds clink_settings, .inputrc and Lua
+    // scripts, and keeps history. init.bat runs before the inject, so it can also steer clink.
+    // Clink (vendored, next to clod.exe) runs from a DLL cache in %TEMP%, so it never locks its files.
     wchar_t Exe[MAX_PATH] = {};
     if(!GetEnvironmentVariableW(L"ComSpec", Exe, MAX_PATH)) { wcscpy_s(Exe, L"cmd.exe"); }
-    wchar_t Home[MAX_PATH] = {};
-    GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+    std::wstring ClodDir = UserClodDir();
     std::wstring Inner;
-    // Clink (vendored, copied next to clod.exe by build.bat) gives the shell history and completion.
-    // It runs from a DLL cache in %TEMP%, so it never locks build\clink. Its own profile keeps
-    // settings and history apart from any clink the user runs elsewhere.
-    wchar_t Self[MAX_PATH] = {};
-    GetModuleFileNameW(0, Self, MAX_PATH);
-    std::wstring Clink = Self;
-    Clink = Clink.substr(0, Clink.find_last_of(L'\\') + 1) + L"clink\\clink_x64.exe";
+    std::wstring Init = ClodDir + L"init.bat";
+    if(GetFileAttributesW(Init.c_str()) != INVALID_FILE_ATTRIBUTES) { Inner = L"call \"" + Init + L"\""; }
+    std::wstring Clink = ExeDir() + L"clink\\clink_x64.exe";
     if(GetFileAttributesW(Clink.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
-        Inner = L"\"" + Clink + L"\" inject --quiet --profile \"" + Home + L"\\.clod\\clink\"";
+        if(!Inner.empty()) { Inner += L" & "; }
+        Inner += L"\"" + Clink + L"\" inject --quiet --profile \"" + ClodDir + L"clink\"";
     }
-    std::wstring Init = std::wstring(Home) + L"\\.clod\\init.bat";
-    if(GetFileAttributesW(Init.c_str()) != INVALID_FILE_ATTRIBUTES) { Inner += (Inner.empty() ? L"\"" : L" & \"") + Init + L"\""; }
     if(!Tab.SessionId.empty())
     {
         if(!Inner.empty()) { Inner += L" & "; }
@@ -94,10 +109,12 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
 
     // --- environment: drop the markers a parent Claude Code session leaves behind ---
     // Inheriting them makes the child think it's a subagent (e.g. it stops saving its transcript).
+    // Inherited clink config locations are dropped, so another clink setup never leaks into clod's.
     static const wchar_t* Strip[] = {
         L"CLAUDECODE", L"CLAUDE_CODE_CHILD_SESSION", L"CLAUDE_CODE_SESSION_ID", L"CLAUDE_CODE_SESSION_ATTENDED",
         L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
         L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
+        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE",
     };
     std::wstring Env;
     wchar_t* Block = GetEnvironmentStringsW();
@@ -296,6 +313,33 @@ static int ServerMain()
         App.LaunchCwd = WideToUtf8(Home);
     }
     App.Sessions = ScanSessions();
+
+    // --- first run (no ~\.clod\init.bat): give the user their own copy of the default shell setup ---
+    // Only missing files are copied, so a user's edits are never overwritten; from then on ~\.clod
+    // is theirs. Deleting init.bat brings back any default they removed.
+    {
+        std::wstring Defaults = ExeDir() + L"shell\\";
+        std::wstring ClodDir = UserClodDir();
+        if(GetFileAttributesW((ClodDir + L"init.bat").c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            std::vector<std::wstring> Dirs = {std::wstring()}; // relative to both roots
+            for(size_t K = 0; K < Dirs.size(); ++K)
+            {
+                CreateDirectoryW((ClodDir + Dirs[K]).c_str(), 0);
+                WIN32_FIND_DATAW Found = {};
+                HANDLE Find = FindFirstFileW((Defaults + Dirs[K] + L"*").c_str(), &Found);
+                if(Find == INVALID_HANDLE_VALUE) { continue; }
+                do
+                {
+                    std::wstring Name = Found.cFileName;
+                    if(Name == L"." || Name == L"..") { continue; }
+                    if(Found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { Dirs.push_back(Dirs[K] + Name + L"\\"); }
+                    else { CopyFileW((Defaults + Dirs[K] + Name).c_str(), (ClodDir + Dirs[K] + Name).c_str(), TRUE); }
+                } while(FindNextFileW(Find, &Found));
+                FindClose(Find);
+            }
+        }
+    }
 
     // `clod --test`: a throwaway instance for trying UI changes next to the real one. No tray, no
     // restore file, and it ends together with its window.
