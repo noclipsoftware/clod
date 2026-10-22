@@ -11,3 +11,19 @@ terminal.mouse_input = off
 # name: Share history between instances
 # type: boolean
 history.shared = True
+
+# Input colors (clink's "4-bit Enhanced Defaults" theme, with plain typed text): the 16 terminal
+# colors only, so they follow clod's palette.
+color.arginfo = yellow
+color.argmatcher = bold bright green
+color.cmdredir = yellow
+color.cmdsep = magenta
+color.description = cyan
+color.doskey = bold bright cyan
+color.executable = bold bright blue
+color.flag = cyan
+color.hidden = red
+color.histexpand = bright white on magenta
+color.readonly = green
+color.selection = black on bright yellow
+color.unrecognized = bright red

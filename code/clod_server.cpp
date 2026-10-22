@@ -261,6 +261,14 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
     for(char Ch : Tab.SessionId.empty() ? Tab.HistoryId : Tab.SessionId) { if(isalnum((u8)Ch) && Label.size() < 32) { Label += (wchar_t)Ch; } }
     Env += L"CLINK_HISTORY_LABEL=" + Label;
     Env.push_back(0);
+    // Tab completion for git, npm, winget, ... (vendored clink-completions, next to clod.exe). Clink
+    // still loads the profile's own scripts; init.bat can add to CLINK_PATH or clear it.
+    std::wstring Completions = ExeDir() + L"clink-completions";
+    if(GetFileAttributesW(Completions.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        Env += L"CLINK_PATH=" + Completions;
+        Env.push_back(0);
+    }
     Env.push_back(0);
 
     std::string Error;

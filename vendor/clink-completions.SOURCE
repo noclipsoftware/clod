@@ -1,0 +1,8 @@
+clink-completions 0.6.9: the unmodified "Source code (zip)" of the release
+https://github.com/vladimir-kotikov/clink-completions/releases/tag/v0.6.9
+
+Licensed under MIT (vendor/clink-completions/LICENSE).
+
+build.bat copies it to build\clink-completions; the server puts that folder on each tab's
+CLINK_PATH. To upgrade, replace vendor/clink-completions with a newer release's source zip
+and update this file.

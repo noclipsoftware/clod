@@ -1,0 +1,12 @@
+;= Aliases for every clod tab: a doskey macro file, loaded by init.bat. One "name=command" per line;
+;= $* is the rest of the typed line, $1..$9 single arguments. Lines starting with ;= are comments.
+;= ls and friends come from Git for Windows' usr\bin (init.bat finds it).
+ls=ls --color=auto --show-control-chars -F -I "NTUSER.DAT*" -I "ntuser.*" $*
+l=ls --color=auto --show-control-chars -F -ghG -I "NTUSER.DAT*" -I "ntuser.*" $*
+ll=ls --color=auto --show-control-chars -F -ghGA -I "NTUSER.DAT*" -I "ntuser.*" $*
+la=ls --color=auto --show-control-chars -F -A $*
+e.=explorer .
+gl=git log --oneline --graph --decorate $*
+gs=git status $*
+clear=cls
+pwd=cd
