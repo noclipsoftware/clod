@@ -524,6 +524,7 @@ static int ServerMain()
     App.Sessions = ScanSessions();
 
     SeedUserSetup(); // first run: the user's own copy of the default shell setup and settings
+    InstallFonts();  // Iosevka Clod for every app, if it isn't installed yet
 
     // `clod --test`: a throwaway instance for trying UI changes next to the real one. No tray, no
     // restore file, and it ends together with its window.

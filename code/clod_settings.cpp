@@ -101,3 +101,36 @@ static void SeedUserSetup()
         }
     }
 }
+
+// clod's font, "Iosevka Clod" (build\fonts, from tools\make_font.py), installed for this user so every
+// app can use it: per-user fonts need no admin (Windows 10 1809+). Only what's missing is installed,
+// nothing is overwritten. Run by the server and by clodw, before it picks its font.
+static void InstallFonts()
+{
+    static const wchar_t* Files[][2] = {
+        {L"IosevkaClod-Regular.ttf", L"Iosevka Clod (TrueType)"},
+        {L"IosevkaClod-Bold.ttf", L"Iosevka Clod Bold (TrueType)"},
+    };
+    wchar_t Local[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", Local, MAX_PATH);
+    std::wstring Dest = std::wstring(Local) + L"\\Microsoft\\Windows\\Fonts\\";
+    HKEY Key = 0;
+    if(RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, 0, 0,
+                       KEY_QUERY_VALUE | KEY_SET_VALUE, 0, &Key, 0) != ERROR_SUCCESS) { return; }
+    bool32 Added = false;
+    for(u32 I = 0; I < ArrayCount(Files); ++I)
+    {
+        std::wstring Src = ExeDir() + L"fonts\\" + Files[I][0];
+        std::wstring Dst = Dest + Files[I][0];
+        bool32 Registered = RegQueryValueExW(Key, Files[I][1], 0, 0, 0, 0) == ERROR_SUCCESS;
+        bool32 Present = GetFileAttributesW(Dst.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if((Registered && Present) || GetFileAttributesW(Src.c_str()) == INVALID_FILE_ATTRIBUTES) { continue; }
+        CreateDirectoryW(Dest.c_str(), 0);
+        if(!Present && !CopyFileW(Src.c_str(), Dst.c_str(), TRUE)) { continue; }
+        RegSetValueExW(Key, Files[I][1], 0, REG_SZ, (const BYTE*)Dst.c_str(), (DWORD)((Dst.size() + 1) * sizeof(wchar_t)));
+        AddFontResourceW(Dst.c_str());
+        Added = true;
+    }
+    RegCloseKey(Key);
+    if(Added) { PostMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0); } // running apps refresh their font lists
+}

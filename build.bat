@@ -33,6 +33,9 @@ if errorlevel 1 (set ERR=1& goto :done)
 rem --- default shell setup; the server copies it to %USERPROFILE%\.clod on first run ---
 xcopy /e /i /y /q /d "%ROOT%shell" shell >nul
 if errorlevel 1 (set ERR=1& goto :done)
+rem --- Iosevka Clod (vendor\fonts, SIL OFL 1.1); clod installs it for the user on start ---
+xcopy /e /i /y /q /d "%ROOT%vendor\fonts" fonts >nul
+if errorlevel 1 (set ERR=1& goto :done)
 
 rem --- a running clod locks clod.exe, but Windows still lets it be renamed: move it aside so the ---
 rem --- new build can land while the old one keeps running. Old copies go once nothing uses them. ---

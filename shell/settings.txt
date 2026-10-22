@@ -1,2 +1,3 @@
 # clod settings: "key = value" lines. Font... and Opacity in the window menu write here too.
+font = Iosevka Clod
 opacity = 95

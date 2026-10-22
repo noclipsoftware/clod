@@ -873,7 +873,8 @@ static int WindowMain(s32 JumpToTab)
     static clodw C = {};
     RaiseForTyping(GetCurrentProcess());
     SeedUserSetup(); // a new install's default settings.txt (opacity 95) is there before it's read
-    C.FontFamily = L"Cascadia Mono";
+    InstallFonts();  // Iosevka Clod, clod's default font, before the font is picked
+    C.FontFamily = L"Iosevka Clod"; // bundled and installed by InstallFonts
     C.FontPt = DEFAULT_FONT_PT;
     C.KeepActiveOff = (ReadSetting("keep_active") == "off");
     C.CopyOnSelectOff = (ReadSetting("copy_on_select") == "off");

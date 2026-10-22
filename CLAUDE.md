@@ -26,6 +26,12 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   cells). Input goes back as VT bytes, so `HandleInput` serves both clients. Font and size: the
   window menu's Font... (any installed font) or `~\.clod\settings.txt` (`font`, `font_size`).
   Written from scratch after refterm's technique; refterm is GPL-2.0, so copy none of its code.
+- clod ships its own font, "Iosevka Clod": Iosevka Term (SIL OFL 1.1, no Reserved Font Name), regular
+  and bold, with only the family name changed (`tools/make_font.py`, source in `vendor/fonts.SOURCE`)
+  so it sits next to any Iosevka the user has. `build.bat` copies `vendor/fonts` to `buildonts`;
+  `InstallFonts` (server and clodw start) installs it per user for every app (no admin: copy to
+  `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, HKCU Fonts key, `AddFontResourceW`, `WM_FONTCHANGE`),
+  only what's missing. It's clodw's built-in default and the default `shell/settings.txt`'s `font`.
 - clodw text (stage 2): cells come from ConPTY one codepoint each, so clodw groups a base cell
   with the cells that join it (`IsClusterExtender`, what follows a ZWJ, a flag's second letter)
   and draws the cluster as one glyph across all of them (up to `GLYPH_MAX_CELLS`), leaving blank

@@ -74,7 +74,7 @@ static void FontSetup(font_state& F, glyph_cache& G, renderer& R, const std::wst
     if(!Font)
     {
         IDWriteFontCollection* System = 0;
-        R.DWrite->GetSystemFontCollection(&System, FALSE);
+        R.DWrite->GetSystemFontCollection(&System, TRUE); // TRUE: sees a font installed moments ago (InstallFonts)
         UINT32 Index = 0;
         BOOL Exists = FALSE;
         System->FindFamilyName(FaceName.c_str(), &Index, &Exists);
