@@ -36,10 +36,10 @@ static std::vector<u32> DrawIcon(s32 Size)
     auto D = [Big](s32 V) { return V * Big / 1024; };
     HGDIOBJ OldPen = SelectObject(Dc, GetStockObject(NULL_PEN));
 
-    // --- near-black rounded block ---
+    // --- near-black rounded block, edge to edge like other apps' taskbar icons ---
     HBRUSH Brush = CreateSolidBrush(RGB(0x14, 0x14, 0x14));
     HGDIOBJ OldBrush = SelectObject(Dc, Brush);
-    RoundRect(Dc, D(40), D(40), D(984) + 1, D(984) + 1, D(300), D(300));
+    RoundRect(Dc, D(0), D(0), D(1024) + 1, D(1024) + 1, D(326), D(326));
     SelectObject(Dc, OldBrush);
     DeleteObject(Brush);
     GdiFlush();
@@ -55,7 +55,7 @@ static std::vector<u32> DrawIcon(s32 Size)
     HDC MaskDc = CreateCompatibleDC(Dc);
     HGDIOBJ OldMaskBitmap = SelectObject(MaskDc, MaskBitmap);
     memset(Mask, 0, (size_t)Big * Big * 4);
-    HFONT Font = CreateFontW(-D(800), 0, 0, 0, FW_BOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Georgia");
+    HFONT Font = CreateFontW(-D(868), 0, 0, 0, FW_BOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Georgia");
     HGDIOBJ OldFont = SelectObject(MaskDc, Font);
     SetBkMode(MaskDc, TRANSPARENT);
     SetTextColor(MaskDc, RGB(255, 255, 255));
@@ -73,7 +73,7 @@ static std::vector<u32> DrawIcon(s32 Size)
         }
     }
     s32 CenterX = D(512);
-    s32 CenterY = D(532); // a touch low: the hooked top makes the glyph look top-heavy
+    s32 CenterY = D(534); // a touch low: the hooked top makes the glyph look top-heavy
     s32 ShiftX = CenterX - (MinX + MaxX) / 2;
     s32 ShiftY = CenterY - (MinY + MaxY) / 2;
     const u32 Glyph[3] = {0xFF, 0xFF, 0xFF}; // B, G, R
