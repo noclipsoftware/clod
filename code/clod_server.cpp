@@ -646,7 +646,17 @@ static int ServerMain()
             u32 Type = 0;
             while(IpcNextMessage(Client, Type, Payload))
             {
-                if(Type == MSG_ATTACH && Payload.size() >= sizeof(msg_attach))
+                u32 Version = 0;
+                if(Type == MSG_ATTACH && Payload.size() >= sizeof(Version)) { memcpy(&Version, Payload.data(), sizeof(Version)); }
+                if(Type == MSG_ATTACH && (Version != CLOD_PROTOCOL_VERSION || Payload.size() < sizeof(msg_attach)))
+                {
+                    // A window from another build would misread everything that follows.
+                    DropClient(Client, "this window is from a different clod build than the running server; quit clod from the tray and open it again");
+                    Attached = false;
+                    ClientWindow = 0;
+                    break;
+                }
+                if(Type == MSG_ATTACH)
                 {
                     msg_attach A = {};
                     memcpy(&A, Payload.data(), sizeof(A));

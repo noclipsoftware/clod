@@ -548,6 +548,7 @@ static int WindowMain(s32 JumpToTab)
         RECT Client = {};
         GetClientRect(C.Window, &Client);
         msg_attach A = {};
+        A.Version = CLOD_PROTOCOL_VERSION;
         A.Width = Max(1, (s32)Client.right / C.F.CellW);
         A.Height = Max(2, (s32)Client.bottom / C.F.CellH);
         A.JumpToTab = JumpToTab;
@@ -642,6 +643,7 @@ static int WindowMain(s32 JumpToTab)
     IpcClose(Server);
     DestroyWindow(C.Window);
     // Another window took over, or the user detached: nothing to report. A lost server is news.
-    if(C.ByeReason == "lost connection to the clod server") { MessageBoxA(0, C.ByeReason.c_str(), "clod", MB_OK | MB_ICONWARNING); }
+    bool32 News = C.ByeReason == "lost connection to the clod server" || C.ByeReason.find("different clod build") != std::string::npos;
+    if(News) { MessageBoxA(0, C.ByeReason.c_str(), "clod", MB_OK | MB_ICONWARNING); }
     return 0;
 }

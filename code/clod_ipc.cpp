@@ -19,8 +19,13 @@ enum
     ATTACH_CELLS = 1, // the client draws cells itself (clodw.exe) instead of taking VT output
 };
 
+// Bump whenever a message's layout or meaning changes: a client from another build is turned away
+// with a clear message instead of misreading the stream.
+#define CLOD_PROTOCOL_VERSION 2
+
 struct msg_attach
 {
+    u32 Version;        // CLOD_PROTOCOL_VERSION; first, so any older client's attach fails the check
     s32 Width;
     s32 Height;
     s32 JumpToTab;      // tab index + 1; 0 = stay on the current tab

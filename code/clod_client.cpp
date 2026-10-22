@@ -73,6 +73,7 @@ static int ClientMain(s32 JumpToTab)
     ConsoleSize(Out, &Width, &Height);
     {
         msg_attach A = {};
+        A.Version = CLOD_PROTOCOL_VERSION;
         A.Width = Width;
         A.Height = Height;
         A.JumpToTab = JumpToTab;

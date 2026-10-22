@@ -26,6 +26,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   cells). Input goes back as VT bytes, so `HandleInput` serves both clients. Font and size: the
   window menu's Font... (any installed font) or `~\.clod\settings.txt` (`font`, `font_size`).
   Written from scratch after refterm's technique; refterm is GPL-2.0, so copy none of its code.
+- Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
+  the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in
   `%LOCALAPPDATA%\clod\tabs.txt`, so a crash or reboot reopens tabs with `--resume`. Shell tabs
   come back as a fresh cmd in the folder they started in.
@@ -105,11 +107,11 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   in its cmd. Claude exiting returns the tab to its shell.
 - The command prefix is `Ctrl+\` by default (`prefix = ctrl+...` in `~\.clod\settings.txt`, read on
   server start and each attach; `PrefixFromName`/`PrefixName` in `clod_app.cpp`). Pressing it twice
-  sends the key itself. The command bar lists the prefix commands only while the prefix is armed;
-  otherwise it shows the direct shortcuts as dim grey hints (Ctrl+PgUp/PgDn, Alt+0-9,
-  Shift+PgUp/PgDn, plus clodw's own when `app_state::WindowClient`), dropping whole entries that
-  don't fit. clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W) that it
-  sends as prefix + key, using the `PrefixKey` the server puts in each `MSG_CELLS` header.
+  sends the key itself. The command bar lists the prefix commands only while the prefix is armed
+  (whole entries, dropped when they don't fit); otherwise, in a tab, its left side is empty and the
+  right shows only a grey "Ctrl+\ commands" (status and scroll position take that spot when
+  present). clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W) that it sends as prefix +
+  key, using the `PrefixKey` the server puts in each `MSG_CELLS` header.
 - The top bar shows **only tabs**. Commands, the close-tab prompt, status messages and the
   scroll position all live in the bottom command bar.
 
