@@ -59,7 +59,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
     (console clients get it re-sent, clodw draws block/underline/bar and blinks the odd shapes).
   - With `clodw.exe` next to `clod.exe`, the tray (`LaunchClientWindow`) opens clodw.
   - Opacity (`opacity = 85` in settings.txt, or the window menu's Opacity submenu, which saves it;
-    20-100, missing = 100): the swap chain goes through DirectComposition with premultiplied alpha
+    20-100, missing = 100; new installs get 95 from the default `shell/settings.txt`): the swap chain goes through DirectComposition with premultiplied alpha
     (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background
     (`GPU_SEE_THROUGH`) and the margin are see-through; text, colored backgrounds and the bars stay solid.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
@@ -121,7 +121,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 - The shell setup belongs to the user and must stay fully editable on their machine. The repo's
   `shell/` holds only the **defaults**; `build.bat` copies them to `build\shell`. On server start,
   if `%USERPROFILE%\.clod\init.bat` is missing, every default file missing from `~\.clod` is copied
-  there (never overwriting). Tabs then use only `~\.clod`: `init.bat` (run first, via `call`) and
+  there (never overwriting; `SeedUserSetup` in `clod_settings.cpp`, run by the server and by clodw
+  before it reads settings.txt). Tabs then use only `~\.clod`: `init.bat` (run first, via `call`) and
   the clink profile `~\.clod\clink` (`inject --profile`), where clink natively reads
   `clink_settings`, `.inputrc` and Lua scripts and keeps history. Inherited `CLINK_*` variables are
   dropped so another clink setup can't leak in; `init.bat` can set its own before the inject.

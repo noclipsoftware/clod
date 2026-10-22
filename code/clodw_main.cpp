@@ -872,6 +872,7 @@ static int WindowMain(s32 JumpToTab)
 {
     static clodw C = {};
     RaiseForTyping(GetCurrentProcess());
+    SeedUserSetup(); // a new install's default settings.txt (opacity 95) is there before it's read
     C.FontFamily = L"Cascadia Mono";
     C.FontPt = DEFAULT_FONT_PT;
     C.KeepActiveOff = (ReadSetting("keep_active") == "off");

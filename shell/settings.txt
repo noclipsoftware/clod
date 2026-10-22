@@ -1,0 +1,2 @@
+# clod settings: "key = value" lines. Font... and Opacity in the window menu write here too.
+opacity = 95
