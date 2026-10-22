@@ -940,6 +940,7 @@ struct frame
     s32 CursorShape;             // DECSCUSR value of the program owning the cursor (0 = default)
     s32 PaneCount;               // the panes' rectangles, so a window can keep a selection inside one
     pane_rect Panes[MAX_PANES];
+    u32 PaneMouseTaken;          // bit per pane: clod or the program there handles the mouse, so a plain drag isn't a selection
 };
 
 static cell Style(u32 Fg, u32 Bg, u16 Attr)
@@ -996,6 +997,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     F.CursorHidden = true;
     F.CursorShape = 0;
     F.PaneCount = 0;
+    F.PaneMouseTaken = 0;
     Hits.clear();
     if(W <= 0 || H <= 0) { return; }
 
@@ -1134,6 +1136,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         F.Panes[Pane] = PaneRect(App, Pane);
         pane_rect PR = PaneRect(App, Pane);
         const tab* PaneTab = App.PaneTab[Pane];
+        // The sessions page takes clicks itself; a program gets them as in HandleInput.
+        if(!PaneTab || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited)) { F.PaneMouseTaken |= 1u << Pane; }
         bool32 Focused = (Pane == App.Focus);
         s32 Top = PR.Y;
         s32 Left = PR.X;

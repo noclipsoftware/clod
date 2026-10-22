@@ -253,7 +253,8 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
     }
     bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY ||
                            Prev.CursorShape != Next.CursorShape;
-    bool32 PanesChanged = Prev.PaneCount != Next.PaneCount || memcmp(Prev.Panes, Next.Panes, sizeof(Next.Panes)) != 0;
+    bool32 PanesChanged = Prev.PaneCount != Next.PaneCount || memcmp(Prev.Panes, Next.Panes, sizeof(Next.Panes)) != 0 ||
+                          Prev.PaneMouseTaken != Next.PaneMouseTaken;
     if(!RowCount && !CursorChanged && !TitleChanged && !PanesChanged) { return false; }
 
     msg_cells H = {};
@@ -273,6 +274,7 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
         H.Panes[P][2] = Next.Panes[P].W;
         H.Panes[P][3] = Next.Panes[P].H;
     }
+    H.PaneMouseTaken = Next.PaneMouseTaken;
     H.TitleLen = (u32)Title.size();
     H.RowCount = RowCount;
     Out.append((const char*)&H, sizeof(H));

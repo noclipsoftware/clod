@@ -25,6 +25,7 @@ struct clodw
     s32 CursorShape; // DECSCUSR from the server (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
     s32 PaneCount;
     s32 Panes[4][4]; // pane rectangles {x, y, w, h}: a selection stays inside one
+    u32 PaneMouseTaken; // bit per pane: the program there (or the sessions page) takes the mouse
     std::string Title;
 
     // --- selection, in cells (inclusive): drag, or Shift+drag while a program has the mouse ---
@@ -35,7 +36,11 @@ struct clodw
     s32 SelAy;
     s32 SelBx;             // moving end
     s32 SelBy;
-    bool32 BlinkOff;       // a blinking cursor is in its hidden phase
+    s32 Clicks;            // 1, 2, 3: click, double-click (word), triple-click (line)
+    u64 ClickAtMs;
+    s32 ClickX;
+    s32 ClickY;
+    bool32 BlinkOff;      // a blinking cursor is in its hidden phase
     u64 BlinkAtMs;         // last blink toggle; input restarts it visible
 
     std::string InBytes;   // input not yet sent
@@ -117,6 +122,14 @@ static void SetClipboardText(HWND Window, const std::string& Utf8)
     CloseClipboard();
 }
 
+// Where the window's place is kept between runs: %LOCALAPPDATA%\clod\window<instance>.txt.
+static std::wstring WindowFilePath()
+{
+    wchar_t Base[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", Base, MAX_PATH);
+    return std::wstring(Base) + L"\\clod\\window" + InstanceSuffix() + L".txt";
+}
+
 // One round of work: send input and size, apply what the server sent, redraw if anything changed.
 // Runs from the main loop, and from a timer while Windows holds the thread in a move/resize loop.
 static void Tick(clodw& C)
@@ -181,6 +194,7 @@ static void Tick(clodw& C)
             C.CursorShape = H.CursorShape;
             C.PaneCount = Clamp(H.PaneCount, 0, 4);
             memcpy(C.Panes, H.Panes, sizeof(C.Panes));
+            C.PaneMouseTaken = H.PaneMouseTaken;
             if(Title != C.Title)
             {
                 C.Title = Title;
@@ -634,22 +648,54 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                 }
             }
 
-            // --- selection: a plain drag when no program has the mouse, Shift+drag always; it stays
-            // inside the pane it starts in ---
-            if(Button == 0 && (C->MouseMode == 0 || (W & MK_SHIFT)))
+            // --- selection: a plain drag in a pane whose program doesn't take the mouse, Shift+drag in
+            // any pane; it stays inside the pane it starts in. A plain one still reports the press and
+            // release (the server focuses the pane), Shift+drag over a program reports nothing ---
+            bool32 Selects = false;
+            bool32 Quiet = false;
+            for(s32 P = 0; P < C->PaneCount && Button == 0; ++P)
             {
-                for(s32 P = 0; P < C->PaneCount; ++P)
+                const s32* R = C->Panes[P];
+                if(Cx < R[0] || Cx >= R[0] + R[2] || Cy < R[1] || Cy >= R[1] + R[3]) { continue; }
+                bool32 Taken = (C->PaneMouseTaken >> P) & 1;
+                Selects = !Taken || (W & MK_SHIFT);
+                Quiet = Taken;
+                if(Selects)
                 {
-                    const s32* R = C->Panes[P];
-                    if(Cx < R[0] || Cx >= R[0] + R[2] || Cy < R[1] || Cy >= R[1] + R[3]) { continue; }
                     memcpy(C->SelPane, R, sizeof(C->SelPane));
                     C->Selecting = true;
                     C->SelAx = C->SelBx = Cx;
                     C->SelAy = C->SelBy = Cy;
                     SetCapture(Window);
+
+                    // --- double-click selects a word, triple-click the pane's row ---
+                    u64 NowMs = GetTickCount64();
+                    bool32 Again = NowMs - C->ClickAtMs <= GetDoubleClickTime() && Cx == C->ClickX && Cy == C->ClickY;
+                    C->Clicks = Again ? C->Clicks % 3 + 1 : 1;
+                    C->ClickAtMs = NowMs;
+                    C->ClickX = Cx;
+                    C->ClickY = Cy;
+                    if(C->Clicks == 2 && Cy < C->GridH)
+                    {
+                        const cell* Row = C->Grid.data() + (size_t)Cy * C->GridW;
+                        auto Stop = [](const cell& Cl) { return !(Cl.Flags & CELL_WIDE_CONT) && (Cl.Codepoint <= ' ' || (Cl.Codepoint < 0x80 && strchr("\"'`()[]{}<>|,;", (int)Cl.Codepoint))); };
+                        if(!Stop(Row[Cx]))
+                        {
+                            while(C->SelAx > R[0] && !Stop(Row[C->SelAx - 1])) { C->SelAx -= 1; }
+                            while(C->SelBx + 1 < R[0] + R[2] && !Stop(Row[C->SelBx + 1])) { C->SelBx += 1; }
+                            C->HasSelection = true;
+                        }
+                    }
+                    if(C->Clicks == 3)
+                    {
+                        C->SelAx = R[0];
+                        C->SelBx = R[0] + R[2] - 1;
+                        C->HasSelection = true;
+                    }
+                    C->Dirty = true;
                 }
-                return 0;
             }
+            if(Selects && Quiet) { return 0; }
             SetCapture(Window);
             C->MouseHeld = Button + 1;
             MouseReport(*C, Button, L, false);
@@ -659,7 +705,7 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         {
             s32 Button = (Msg == WM_LBUTTONUP) ? 0 : (Msg == WM_MBUTTONUP ? 1 : 2);
             ReleaseCapture();
-            if(C->Selecting && Button == 0) { C->Selecting = false; return 0; }
+            if(C->Selecting && Button == 0) { C->Selecting = false; if(!C->MouseHeld) { return 0; } }
             C->MouseHeld = 0;
             MouseReport(*C, Button, L, true);
             return 0;
@@ -671,6 +717,7 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                 // The moving end follows the pointer, held inside the selection's pane.
                 s32 Cx = Clamp(GET_X_LPARAM(L) / Max(C->F.CellW, 1), C->SelPane[0], C->SelPane[0] + C->SelPane[2] - 1);
                 s32 Cy = Clamp(GET_Y_LPARAM(L) / Max(C->F.CellH, 1), C->SelPane[1], C->SelPane[1] + C->SelPane[3] - 1);
+                if(C->Clicks > 1 && Cx == C->ClickX && Cy == C->ClickY) { return 0; } // keep the word/row until the drag leaves its cell
                 if(Cx != C->SelBx || Cy != C->SelBy)
                 {
                     C->SelBx = Cx;
@@ -737,10 +784,34 @@ static int WindowMain(s32 JumpToTab)
     AppendMenuW(WindowMenu, MF_STRING, IDM_FONT, L"Font...");
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
-    RECT Want = {0, 0, 120 * C.F.CellW, 36 * C.F.CellH};
-    AdjustWindowRectExForDpi(&Want, Style, FALSE, 0, C.Dpi);
-    SetWindowPos(C.Window, 0, 0, 0, Want.right - Want.left, Want.bottom - Want.top, SWP_NOMOVE | SWP_NOZORDER);
-    ShowWindow(C.Window, SW_SHOWNORMAL);
+
+    // --- where the window was last time ("left top right bottom maximized"), if that's still on a
+    // monitor; placed twice because landing on a monitor of another DPI rescales the first try ---
+    s32 Show = SW_SHOWNORMAL;
+    WINDOWPLACEMENT Place = {sizeof(Place)};
+    s32 Maximized = 0;
+    FILE* PlaceFile = 0;
+    _wfopen_s(&PlaceFile, WindowFilePath().c_str(), L"rb");
+    bool32 Placed = PlaceFile && fscanf_s(PlaceFile, "%ld %ld %ld %ld %d", &Place.rcNormalPosition.left, &Place.rcNormalPosition.top,
+                                          &Place.rcNormalPosition.right, &Place.rcNormalPosition.bottom, &Maximized) == 5;
+    if(PlaceFile) { fclose(PlaceFile); }
+    Placed = Placed && Place.rcNormalPosition.right - Place.rcNormalPosition.left >= 100 && Place.rcNormalPosition.bottom - Place.rcNormalPosition.top >= 50 &&
+             MonitorFromRect(&Place.rcNormalPosition, MONITOR_DEFAULTTONULL);
+    if(Placed)
+    {
+        Place.showCmd = SW_HIDE;
+        SetWindowPlacement(C.Window, &Place);
+        SetWindowPlacement(C.Window, &Place);
+        Show = Maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+    }
+    else
+    {
+        // First run: 120x36 cells at the monitor's DPI.
+        RECT Want = {0, 0, 120 * C.F.CellW, 36 * C.F.CellH};
+        AdjustWindowRectExForDpi(&Want, Style, FALSE, 0, C.Dpi);
+        SetWindowPos(C.Window, 0, 0, 0, Want.right - Want.left, Want.bottom - Want.top, SWP_NOMOVE | SWP_NOZORDER);
+    }
+    ShowWindow(C.Window, Show);
 
     // --- connect (starting clod.exe --server from this folder if needed) and attach for cells ---
     wchar_t Self[MAX_PATH] = {};
@@ -895,6 +966,22 @@ static int WindowMain(s32 JumpToTab)
     }
 
     IpcClose(Server);
+
+    // --- remember where the window is (not for a throwaway --test window) ---
+    WINDOWPLACEMENT Now = {sizeof(Now)};
+    if(GetEnvironmentVariableW(L"CLOD_EPHEMERAL", 0, 0) == 0 && GetWindowPlacement(C.Window, &Now))
+    {
+        bool32 Zoomed = Now.showCmd == SW_SHOWMAXIMIZED || (Now.showCmd == SW_SHOWMINIMIZED && (Now.flags & WPF_RESTORETOMAXIMIZED));
+        std::wstring Path = WindowFilePath();
+        CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
+        FILE* File = 0;
+        _wfopen_s(&File, Path.c_str(), L"wb");
+        if(File)
+        {
+            fprintf(File, "%ld %ld %ld %ld %d\r\n", Now.rcNormalPosition.left, Now.rcNormalPosition.top, Now.rcNormalPosition.right, Now.rcNormalPosition.bottom, Zoomed ? 1 : 0);
+            fclose(File);
+        }
+    }
     DestroyWindow(C.Window);
     // Another window took over, or the user detached: nothing to report. A lost server is news.
     bool32 News = C.ByeReason == "lost connection to the clod server" || C.ByeReason.find("different clod build") != std::string::npos;
