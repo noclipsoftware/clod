@@ -7,8 +7,8 @@ side-effects-at-edges); those rules apply here, match them.
 ## What this project is
 
 A Windows terminal tab manager for Claude Code sessions, in C++ (MSVC unity build, `build.bat`).
-Each tab is a real `claude.exe` running in its own ConPTY. clod emulates each tab's screen and
-composites the active one between a tab bar (top row) and a command bar (bottom row), tmux-style.
+Each tab is a real `cmd.exe` (running `~\.clod\init.bat` if it exists) in its own ConPTY, and is a
+claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites the active one between a tab bar (top row) and a command bar (bottom row), tmux-style.
 It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, Git Bash in WT).
 
 ## Process architecture
@@ -19,18 +19,38 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   console over a per-user named pipe (`code/clod_ipc.cpp`). Closing the window only kills the
   client. The first client spawns the server.
 - A second client takes over from the first. The open tab list is persisted in
-  `%LOCALAPPDATA%\clod\tabs.txt`, so a crash or reboot reopens tabs with `--resume`.
+  `%LOCALAPPDATA%\clod\tabs.txt`, so a crash or reboot reopens tabs with `--resume`. Shell tabs
+  come back as a fresh cmd in the folder they started in.
 - `code/clod_app.cpp` is the pure core. Input becomes `app_command`s that the server executes;
   `Compose` turns state into a cell grid; `RenderFrame` diffs two grids into VT bytes.
   Keep OS calls out of it.
 
+## Tabs: cmd hosting claude
+
+- Opening a session starts
+  `cmd /k "clink inject & init.bat & cd /d <cwd> & claude --resume|--session-id <id>"`, so claude
+  exiting drops to the shell prompt (Claude Code prints its own `claude --resume <id>` hint).
+  `exit` in cmd closes the tab.
+- Clink is vendored unmodified in `vendor/clink` (GPL-3.0, like clod; version and source link in
+  `vendor/clink.SOURCE`). `build.bat` copies it to `build\clink`. Its profile (settings, history)
+  is `%USERPROFILE%\.clod\clink`. Clink loads its DLL from `%TEMP%\clink\dll_cache`, so running
+  tabs never lock `build\clink`. To upgrade, replace `vendor/clink` with a new release zip and
+  update `vendor/clink.SOURCE`.
+- The server finds claude by session file, not by how it was started: about once a second it walks
+  each tab's process tree and reads `<ClaudeConfigDir>\sessions\<pid>.json` (`sessionId`, `cwd`;
+  `procStart` is checked against the process creation time). So a `claude` typed in a shell, `-c`,
+  the resume picker and `/resume` all keep `tab::SessionId` right. No claude found = plain shell
+  (`SessionId` empty); the tabs file, tab name, dedupe and tray Quit all key off that.
+
 ## Rules from the user (don't regress these)
 
 - **Never expose a way to end every session and forget the tabs.** The tray's single "Quit"
-  stops the server but keeps `tabs.txt`. It asks first only if some tab is mid-reply
-  (`tab::TitleBusy`).
+  stops the server but keeps `tabs.txt`. It asks first only if some claude tab is mid-reply
+  (`tab::TitleBusy`) or some shell tab is running a program (its cmd has a child process).
+  An idle shell at its prompt or an idle claude doesn't count.
 - In the clod window, `q` (sessions page) and `Ctrl+] q` only **detach**. Stop and end-all are
-  not reachable from the window UI. The only way to drop a tab is closing it (`Ctrl+] x`).
+  not reachable from the window UI. A tab is dropped only by closing it (`Ctrl+] x`) or by `exit`
+  in its cmd. Claude exiting returns the tab to its shell.
 - The top bar shows **only tabs**. Commands, the close-tab prompt, status messages and the
   scroll position all live in the bottom command bar.
 

@@ -156,24 +156,50 @@ static LRESULT CALLBACK TrayWindowProc(HWND Window, UINT Msg, WPARAM WParam, LPA
             else if(Picked >= TRAY_MENU_TAB) { Tray->Action = TRAY_OPEN; Tray->ActionTab = Picked - TRAY_MENU_TAB + 2; }
             else if(Picked == TRAY_MENU_QUIT)
             {
-                // Quitting keeps every tab (they reopen next launch); only a reply in progress is lost,
-                // so ask only when claude's title spinner says one is running.
+                // Quitting keeps every tab (they reopen next launch, claude tabs resumed). What is lost
+                // is work in progress: a reply (claude's title spinner is running) or a program running
+                // in a shell tab (cmd at its prompt has no child processes). Ask only when there is some.
+                std::vector<PROCESSENTRY32W> Procs = ListProcesses();
                 std::wstring Busy;
+                std::wstring Shells;
                 s32 BusyCount = 0;
+                s32 ShellCount = 0;
                 for(s32 I = 0; I < (s32)App.Tabs.size(); ++I)
                 {
                     const tab* T = App.Tabs[I];
-                    if(!T->TitleBusy || T->Exited) { continue; }
-                    Busy += L"\n    " + std::to_wstring(I + 1) + L"  " + Utf8ToWide(TruncateText(TabName(*T), 60));
-                    BusyCount += 1;
+                    if(T->Exited) { continue; }
+                    std::wstring Line = L"\n    " + std::to_wstring(I + 1) + L"  " + Utf8ToWide(TruncateText(TabName(*T), 60));
+                    if(!T->SessionId.empty())
+                    {
+                        if(T->TitleBusy) { Busy += Line; BusyCount += 1; }
+                    }
+                    else if(T->Pty)
+                    {
+                        DWORD Pid = GetProcessId(T->Pty->Process);
+                        std::wstring Running;
+                        for(const PROCESSENTRY32W& P : Procs)
+                        {
+                            if(P.th32ParentProcessID == Pid) { Running += (Running.empty() ? L"" : L", ") + std::wstring(P.szExeFile); }
+                        }
+                        if(!Running.empty()) { Shells += Line + L"  (" + Running + L")"; ShellCount += 1; }
+                    }
                 }
                 bool32 Quit = true;
-                if(BusyCount)
+                if(BusyCount || ShellCount)
                 {
-                    std::wstring Ask = (BusyCount == 1 ? L"This session is" : std::to_wstring(BusyCount) + L" sessions are") +
-                                       std::wstring(L" in the middle of a reply:\n") + Busy +
-                                       L"\n\nQuitting now cuts the reply off. Every tab still reopens the next time you run clod.\n\n"
-                                       L"Quit anyway?";
+                    std::wstring Ask;
+                    if(BusyCount)
+                    {
+                        Ask += (BusyCount == 1 ? L"This session is" : std::to_wstring(BusyCount) + L" sessions are") +
+                               std::wstring(L" in the middle of a reply:\n") + Busy + L"\n\nQuitting now cuts the reply off.\n\n";
+                    }
+                    if(ShellCount)
+                    {
+                        Ask += (ShellCount == 1 ? L"This shell is" : std::to_wstring(ShellCount) + L" shells are") +
+                               std::wstring(L" running a program:\n") + Shells +
+                               L"\n\nQuitting ends those programs. The shells reopen as fresh ones.\n\n";
+                    }
+                    Ask += L"Every tab still reopens the next time you run clod.\n\nQuit anyway?";
                     Quit = MessageBoxW(Window, Ask.c_str(), L"clod", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDOK;
                 }
                 if(Quit) { Tray->Action = TRAY_QUIT; }

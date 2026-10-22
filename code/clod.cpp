@@ -15,6 +15,7 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <sddl.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>

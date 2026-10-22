@@ -114,3 +114,16 @@ static void PtyWrite(pty* P, const std::string& Bytes)
     DWORD Written = 0;
     WriteFile(P->InputWrite, Bytes.data(), (DWORD)Bytes.size(), &Written, 0);
 }
+
+// Every process on the machine, with its parent: what a tab's cmd is running lives below it.
+static std::vector<PROCESSENTRY32W> ListProcesses()
+{
+    std::vector<PROCESSENTRY32W> Out;
+    HANDLE Snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if(Snap == INVALID_HANDLE_VALUE) { return Out; }
+    PROCESSENTRY32W E = {};
+    E.dwSize = sizeof(E);
+    for(BOOL More = Process32FirstW(Snap, &E); More; More = Process32NextW(Snap, &E)) { Out.push_back(E); }
+    CloseHandle(Snap);
+    return Out;
+}

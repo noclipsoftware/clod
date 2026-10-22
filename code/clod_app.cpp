@@ -9,6 +9,10 @@ struct pty; // platform-owned
 struct tab
 {
     vt_terminal Term;
+    // Every tab runs cmd. It is a claude tab while claude runs inside that cmd: SessionId is then
+    // that claude's session (empty = plain shell).
+    u32 ClaudePid;          // the claude found running in this tab's cmd; 0 = none seen (yet)
+    u64 LaunchedAtMs;       // the server started claude here and hasn't seen it yet; 0 = not waiting
     std::string SessionId;
     std::string Cwd;
     std::string Project;
@@ -16,8 +20,7 @@ struct tab
     s32 ScrollOffset;       // lines scrolled back from live output; 0 = following
     u64 SeenPushed;         // Term.ScrollbackPushed as of the last scroll fix-up
     bool32 Activity;        // output arrived while in the background
-    bool32 Exited;
-    u32 ExitCode;
+    bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     u64 NotifiedAtMs;       // last tray notification about this tab
     pty* Pty;
@@ -71,6 +74,7 @@ enum command_kind
     CMD_NONE = 0,
     CMD_WRITE,         // Bytes to Tab
     CMD_OPEN,          // SessionId/Cwd/Project/Title; empty SessionId = brand new session
+    CMD_OPEN_SHELL,    // cmd.exe tab in Cwd
     CMD_RESTART,       // Tab
     CMD_CLOSE,         // Tab
     CMD_RESCAN,
@@ -442,6 +446,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             else if(C == 's' || C == 'h') { SwitchTab(App, 0); }
             else if(C == 'c') { NewSession(Cmds, Tab ? Tab->Cwd : App.LaunchCwd); }
             else if(C == 'o') { OpenFolderPrompt(App, Tab ? Tab->Cwd : App.LaunchCwd); }
+            else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = Tab ? Tab->Cwd : App.LaunchCwd; Cmds.push_back(S); }
             else if(C == 'x' && Tab) { App.Prompt = PROMPT_CLOSE_TAB; }
             else if(C == 'r' && Tab) { app_command R = {}; R.Kind = CMD_RESTART; R.Tab = Tab; Cmds.push_back(R); }
             else if(C == 'q' || C == 'd') { app_command D = {}; D.Kind = CMD_DETACH; Cmds.push_back(D); }
@@ -608,6 +613,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 else if(C == 'G') { HomeMoveSelection(App, 1000000); }
                 else if(C == 'n') { NewSession(Cmds, App.LaunchCwd); }
                 else if(C == 'o') { OpenFolderPrompt(App, App.LaunchCwd); }
+                else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = App.LaunchCwd; Cmds.push_back(S); }
                 else if(C == 'N')
                 {
                     std::vector<s32> Filtered = FilterSessions(App);
@@ -653,6 +659,12 @@ static void TabSyncScroll(tab& Tab)
 
 static std::string TabName(const tab& Tab)
 {
+    // cmd's own title is just its exe path, so a shell is named for the folder it started in,
+    // unless a program in it (e.g. claude) set a title of its own.
+    if(Tab.SessionId.empty() && (Tab.Term.Title.empty() || ToLower(Tab.Term.Title).find("cmd.exe") != std::string::npos))
+    {
+        return "cmd " + (!Tab.Project.empty() ? Tab.Project : Tab.Cwd);
+    }
     std::string Fallback = !Tab.Title.empty() ? Tab.Title : (!Tab.Project.empty() ? Tab.Project : "claude");
     std::string Name = Tab.Term.Title;
     if(Name.empty()) { return Fallback; }
@@ -806,12 +818,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         else
         {
             static const char* PrefixKeys[] = {
-                "0-9", "tab", "n/p", "next/prev", "c", "new", "o", "folder", "x", "close", "r", "restart",
+                "0-9", "tab", "n/p", "next/prev", "c", "new", "o", "folder", "t", "shell", "x", "close", "r", "restart",
                 "s", "sessions", "m", "mouse", "q", "detach",
             };
             static const char* HomeKeys[] = {
                 "Enter", "open", "\xE2\x86\x91\xE2\x86\x93", "select", "/", "filter", "n", "new here",
-                "N", "new in project", "o", "new in folder", "r", "rescan", "q", "detach",
+                "N", "new in project", "o", "new in folder", "t", "shell", "r", "rescan", "q", "detach",
             };
             bool32 ShowPrefix = Armed || Active;
             const char** Keys = ShowPrefix ? PrefixKeys : HomeKeys;
@@ -895,9 +907,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             cell Banner = Style(Rgb(255, 255, 255), Rgb(150, 40, 40), 0);
             FillRow(F, Top + ContentH - 1, 0, W, Banner);
-            std::string What = Active->Pty ? "claude exited (code " + std::to_string(Active->ExitCode) + ")   Enter restart"
-                                           : std::string("claude not started   Enter try again");
-            PutText(F, 1, Top + ContentH - 1, What + "   Ctrl+] x close", Banner, W);
+            PutText(F, 1, Top + ContentH - 1, "cmd not started   Enter try again   Ctrl+] x close", Banner, W);
         }
         return;
     }

@@ -32,34 +32,17 @@ static std::string NewUuid()
     return Buf;
 }
 
-// (Re)starts claude for a tab: resume when the session file exists, otherwise claim the tab's id.
+// (Re)starts a tab's cmd, running the user's init.bat. With a SessionId, cmd then runs claude:
+// resuming when the session file exists, otherwise claiming the id. Claude exiting leaves the shell.
 static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_state& App, u64 NowMs)
 {
     VtInit(Tab.Term, Cols, Rows);
     Tab.ScrollOffset = 0;
     Tab.SeenPushed = 0;
     Tab.Exited = false;
-    Tab.ExitCode = 0;
     Tab.TitleBusy = false;
-
-    // --- no Claude Code on this machine: say so in the tab instead of failing obscurely ---
-    std::wstring Claude = FindClaude();
-    if(Claude.empty())
-    {
-        static const char Message[] =
-            "\r\n  \x1b[1mClaude Code is not installed\x1b[0m (no claude.exe or claude.cmd found).\r\n\r\n"
-            "  Install it from \x1b[4mhttps://claude.com/claude-code\x1b[0m, for example in PowerShell:\r\n\r\n"
-            "      irm https://claude.ai/install.ps1 | iex\r\n\r\n"
-            "  then press Enter here to start this tab.\r\n";
-        VtFeed(Tab.Term, (const u8*)Message, sizeof(Message) - 1);
-        Tab.Term.CursorHidden = true;
-        Tab.Exited = true;
-        Tab.ExitCode = (u32)-1;
-        return;
-    }
-
-    bool32 Resume = SessionFileExists(Tab.SessionId);
-    std::wstring Cmd = Claude + (Resume ? L" --resume " : L" --session-id ") + Utf8ToWide(Tab.SessionId);
+    Tab.ClaudePid = 0;
+    Tab.LaunchedAtMs = 0;
 
     std::wstring Cwd = Utf8ToWide(Tab.Cwd);
     if(Cwd.empty() || GetFileAttributesW(Cwd.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -68,6 +51,46 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         App.StatusUntil = NowMs + 5000;
         Cwd = Utf8ToWide(App.LaunchCwd);
     }
+
+    // --- the command: cmd /k "clink inject & init.bat & cd /d <cwd> & claude ..." ---
+    wchar_t Exe[MAX_PATH] = {};
+    if(!GetEnvironmentVariableW(L"ComSpec", Exe, MAX_PATH)) { wcscpy_s(Exe, L"cmd.exe"); }
+    wchar_t Home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+    std::wstring Inner;
+    // Clink (vendored, copied next to clod.exe by build.bat) gives the shell history and completion.
+    // It runs from a DLL cache in %TEMP%, so it never locks build\clink. Its own profile keeps
+    // settings and history apart from any clink the user runs elsewhere.
+    wchar_t Self[MAX_PATH] = {};
+    GetModuleFileNameW(0, Self, MAX_PATH);
+    std::wstring Clink = Self;
+    Clink = Clink.substr(0, Clink.find_last_of(L'\\') + 1) + L"clink\\clink_x64.exe";
+    if(GetFileAttributesW(Clink.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        Inner = L"\"" + Clink + L"\" inject --quiet --profile \"" + Home + L"\\.clod\\clink\"";
+    }
+    std::wstring Init = std::wstring(Home) + L"\\.clod\\init.bat";
+    if(GetFileAttributesW(Init.c_str()) != INVALID_FILE_ATTRIBUTES) { Inner += (Inner.empty() ? L"\"" : L" & \"") + Init + L"\""; }
+    if(!Tab.SessionId.empty())
+    {
+        if(!Inner.empty()) { Inner += L" & "; }
+        std::wstring Claude = FindClaude();
+        if(Claude.empty())
+        {
+            // No Claude Code on this machine: say so in the shell instead of failing obscurely.
+            Inner += L"echo. & echo   Claude Code is not installed (no claude.exe or claude.cmd found). Install it, e.g. in PowerShell: & "
+                     L"echo. & echo       irm https://claude.ai/install.ps1 ^| iex & echo.";
+            Tab.SessionId.clear();
+        }
+        else
+        {
+            bool32 Resume = SessionFileExists(Tab.SessionId);
+            Inner += L"cd /d \"" + Cwd + L"\" & " + Claude + (Resume ? L" --resume " : L" --session-id ") + Utf8ToWide(Tab.SessionId);
+            Tab.LaunchedAtMs = NowMs;
+        }
+    }
+    // cmd strips the outer quotes of a /k string that holds more than one quoted part.
+    std::wstring Cmd = std::wstring(L"\"") + Exe + L"\"" + (Inner.empty() ? std::wstring() : L" /k \"" + Inner + L"\"");
 
     // --- environment: drop the markers a parent Claude Code session leaves behind ---
     // Inheriting them makes the child think it's a subagent (e.g. it stops saving its transcript).
@@ -94,23 +117,35 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
     if(!Tab.Pty)
     {
         Tab.Exited = true;
-        Tab.ExitCode = (u32)-1;
         App.Status = Error;
         App.StatusUntil = NowMs + 5000;
     }
 }
 
-static tab* OpenTab(app_state& App, const std::string& SessionId, const std::string& Cwd, const std::string& Project, const std::string& Title,
+// Shell: a plain cmd. Otherwise claude runs in it, with SessionId or a brand new one.
+static tab* OpenTab(app_state& App, bool32 Shell, const std::string& SessionId, const std::string& Cwd, const std::string& Project, const std::string& Title,
                     HANDLE Job, HANDLE Wake, u64 NowMs)
 {
     tab* T = new tab();
-    T->SessionId = SessionId.empty() ? NewUuid() : SessionId;
+    T->SessionId = Shell ? std::string() : (SessionId.empty() ? NewUuid() : SessionId);
     T->Cwd = Cwd;
     T->Project = Project;
     T->Title = Title;
     StartTab(*T, App.Width, ContentRows(App.Height), Job, Wake, App, NowMs);
     App.Tabs.push_back(T);
     return T;
+}
+
+static void CloseTab(app_state& App, tab* T)
+{
+    auto It = std::find(App.Tabs.begin(), App.Tabs.end(), T);
+    if(It == App.Tabs.end()) { return; }
+    s32 Index = (s32)(It - App.Tabs.begin()) + 1;
+    PtyClose(T->Pty);
+    delete T;
+    App.Tabs.erase(It);
+    if(App.Active > Index) { App.Active -= 1; } // keep showing the same tab
+    App.Active = Min(App.Active, (s32)App.Tabs.size());
 }
 
 // A path typed in the folder prompt, made absolute: drops quotes, expands ~, resolves relative
@@ -151,7 +186,7 @@ static std::string TabsFileContents(const app_state& App)
     for(const tab* T : App.Tabs)
     {
         std::string Fields[4] = {T->SessionId, T->Cwd, T->Project, T->Title};
-        Out += "tab";
+        Out += T->SessionId.empty() ? "shell" : "tab";
         for(std::string& F : Fields)
         {
             for(char& C : F) { if(C == '\t' || C == '\n' || C == '\r') { C = ' '; } }
@@ -282,10 +317,12 @@ static int ServerMain()
             std::vector<std::string> F = SplitTabs(Saved.substr(At, End - At));
             At = End + 1;
             if(F.size() >= 2 && F[0] == "active") { SavedActive = atoi(F[1].c_str()); }
-            // A tab that never got a prompt has no session file; there is nothing to resume.
-            if(F.size() >= 5 && F[0] == "tab" && SessionFileExists(F[1]))
+            // A claude tab resumes its session. A shell can't be resumed; it comes back as a fresh
+            // one in the same folder, as does a claude that never got a prompt (no session file).
+            if(F.size() >= 5 && (F[0] == "tab" || F[0] == "shell"))
             {
-                OpenTab(App, F[1], F[2], F[3], F[4], Job, Wake, GetTickCount64());
+                bool32 Claude = (F[0] == "tab" && SessionFileExists(F[1]));
+                OpenTab(App, !Claude, F[1], F[2], F[3], Claude ? F[4] : std::string(), Job, Wake, GetTickCount64());
             }
         }
         App.Active = Clamp(SavedActive, 0, (s32)App.Tabs.size());
@@ -302,6 +339,7 @@ static int ServerMain()
     u64 ResizeAtMs = 0;         // pending child resize, applied once the window settles
     u64 SyncSinceMs = 0;        // when the active child began a synchronized update
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
+    u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
     std::string OuterTitle;
     s32 OuterMouse = -1;        // mouse tracking mode currently requested from the client's terminal
     tab* FocusedTab = 0;        // compared by address only; may dangle after a close
@@ -446,7 +484,12 @@ static int ServerMain()
                 case CMD_WRITE: PtyWrite(C.Tab->Pty, C.Bytes); break;
                 case CMD_OPEN:
                 {
-                    OpenTab(App, C.SessionId, C.Cwd, C.Project, C.Title, Job, Wake, NowMs);
+                    OpenTab(App, false, C.SessionId, C.Cwd, C.Project, C.Title, Job, Wake, NowMs);
+                    SwitchTab(App, (s32)App.Tabs.size());
+                } break;
+                case CMD_OPEN_SHELL:
+                {
+                    OpenTab(App, true, std::string(), C.Cwd, ProjectName(C.Cwd), std::string(), Job, Wake, NowMs);
                     SwitchTab(App, (s32)App.Tabs.size());
                 } break;
                 case CMD_OPEN_FOLDER:
@@ -464,7 +507,7 @@ static int ServerMain()
                     }
                     App.Prompt = PROMPT_NONE;
                     App.PathInput.clear();
-                    OpenTab(App, std::string(), Cwd, ProjectName(Cwd), std::string(), Job, Wake, NowMs);
+                    OpenTab(App, false, std::string(), Cwd, ProjectName(Cwd), std::string(), Job, Wake, NowMs);
                     SwitchTab(App, (s32)App.Tabs.size());
                 } break;
                 case CMD_COMPLETE_FOLDER:
@@ -516,15 +559,7 @@ static int ServerMain()
                     C.Tab->Pty = 0;
                     StartTab(*C.Tab, App.Width, ContentRows(App.Height), Job, Wake, App, NowMs);
                 } break;
-                case CMD_CLOSE:
-                {
-                    auto It = std::find(App.Tabs.begin(), App.Tabs.end(), C.Tab);
-                    if(It == App.Tabs.end()) { break; }
-                    PtyClose(C.Tab->Pty);
-                    delete C.Tab;
-                    App.Tabs.erase(It);
-                    App.Active = Min(App.Active, (s32)App.Tabs.size());
-                } break;
+                case CMD_CLOSE: CloseTab(App, C.Tab); break;
                 case CMD_RESCAN:
                 {
                     App.Sessions = ScanSessions();
@@ -553,6 +588,7 @@ static int ServerMain()
         // --- child output into emulators ---
         std::string Chunk;
         std::string ToClient; // pass-through sequences and bells for the attached terminal
+        std::vector<tab*> Ended;
         for(s32 I = 0; I < (s32)App.Tabs.size(); ++I)
         {
             tab* T = App.Tabs[I];
@@ -585,7 +621,7 @@ static int ServerMain()
                 {
                     ToClient += "\x07";
                     T->Term.Bell = false;
-                    Why = "Claude needs your attention";
+                    Why = T->SessionId.empty() ? "Bell" : "Claude needs your attention";
                 }
                 if(!T->Term.Notify.empty())
                 {
@@ -593,13 +629,12 @@ static int ServerMain()
                     T->Term.Notify.clear();
                 }
             }
+            // cmd ending (exit typed in the shell) ends the tab.
             if(!T->Exited && WaitForSingleObject(T->Pty->Process, 0) == WAIT_OBJECT_0)
             {
-                DWORD Code = 0;
-                GetExitCodeProcess(T->Pty->Process, &Code);
                 T->Exited = true;
-                T->ExitCode = Code;
                 Dirty = true;
+                Ended.push_back(T);
             }
 
             bool32 Unseen = !Attached || T != ActiveTab(App);
@@ -607,6 +642,71 @@ static int ServerMain()
             {
                 TrayNotify(Tray, TabName(*T), Why, I + 1);
                 T->NotifiedAtMs = NowMs;
+            }
+        }
+        for(tab* T : Ended) { CloseTab(App, T); }
+
+        // --- which tabs are running claude ---
+        // Claude Code writes ~/.claude/sessions/<pid>.json for each running instance. A tab is a
+        // claude tab while one of those pids lives somewhere under its cmd; the file names the
+        // session, so a claude typed in a shell (or switched with /resume) is tracked too.
+        if(!App.Tabs.empty() && NowMs - ClaudeScanMs >= 1000)
+        {
+            ClaudeScanMs = NowMs;
+            std::vector<PROCESSENTRY32W> Procs = ListProcesses();
+            std::wstring SessionsDir = ClaudeConfigDir() + L"\\sessions\\";
+            for(tab* T : App.Tabs)
+            {
+                if(!T->Pty || T->Exited) { continue; }
+                std::vector<DWORD> Tree = {GetProcessId(T->Pty->Process)};
+                for(size_t K = 0; K < Tree.size() && Tree.size() < 256; ++K)
+                {
+                    for(const PROCESSENTRY32W& P : Procs)
+                    {
+                        if(P.th32ParentProcessID == Tree[K] && P.th32ProcessID != Tree[K]) { Tree.push_back(P.th32ProcessID); }
+                    }
+                }
+                u32 Pid = 0;
+                std::string Id;
+                std::string Cwd;
+                for(size_t K = 1; K < Tree.size() && !Pid; ++K)
+                {
+                    HANDLE File = CreateFileW((SessionsDir + std::to_wstring(Tree[K]) + L".json").c_str(), GENERIC_READ,
+                                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+                    if(File == INVALID_HANDLE_VALUE) { continue; }
+                    std::string Json = ReadFileRange(File, 0, 64 * 1024);
+                    CloseHandle(File);
+                    // A stale file from an earlier process with the same pid has another start time.
+                    std::string Start;
+                    HANDLE Proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Tree[K]);
+                    FILETIME Created = {}, Ignored[3] = {};
+                    bool32 Timed = Proc && GetProcessTimes(Proc, &Created, &Ignored[0], &Ignored[1], &Ignored[2]);
+                    if(Proc) { CloseHandle(Proc); }
+                    u64 CreatedFt = ((u64)Created.dwHighDateTime << 32) | Created.dwLowDateTime;
+                    if(JsonFindString(Json, "procStart", false, Start) && Timed && Start != std::to_string(CreatedFt)) { continue; }
+                    if(JsonFindString(Json, "sessionId", false, Id) && !Id.empty())
+                    {
+                        JsonFindString(Json, "cwd", false, Cwd);
+                        Pid = Tree[K];
+                    }
+                }
+                if(Pid)
+                {
+                    if(Id != T->SessionId) { T->SessionId = Id; T->Title.clear(); Dirty = true; }
+                    if(!Cwd.empty() && Cwd != T->Cwd) { T->Cwd = Cwd; T->Project = ProjectName(Cwd); Dirty = true; }
+                    T->ClaudePid = Pid;
+                    T->LaunchedAtMs = 0;
+                }
+                else if(T->ClaudePid || (T->LaunchedAtMs && NowMs - T->LaunchedAtMs > 30000))
+                {
+                    // Claude left (or the one the server started never showed up): back to a shell.
+                    T->ClaudePid = 0;
+                    T->LaunchedAtMs = 0;
+                    T->SessionId.clear();
+                    T->Title.clear();
+                    T->TitleBusy = false;
+                    Dirty = true;
+                }
             }
         }
         if(Attached && !ToClient.empty() && !IpcSendString(Client, MSG_OUTPUT, ToClient)) { IpcClose(Client); Attached = false; }
