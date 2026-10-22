@@ -1013,8 +1013,9 @@ static bool32 OuterWidthMayDiffer(u32 Cp)
     return true;
 }
 
-// Returns false when nothing visible changed.
-static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next, bool32 Full)
+// Returns false when nothing visible changed. OuterWide: sorted codepoints the window's console draws
+// 2 cells wide where CharWidth says 1 (a classic console sizes ambiguous-width characters by font).
+static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next, bool32 Full, const std::vector<u32>& OuterWide)
 {
     if(Prev.Width != Next.Width || Prev.Height != Next.Height || Prev.Cells.size() != Next.Cells.size()) { Full = true; }
 
@@ -1044,9 +1045,14 @@ static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next
             // terminals: send them together and both agree.
             bool32 EmojiPair = !(C.Flags & CELL_WIDE) && X + 1 < W && Row[X + 1].Codepoint == 0xFE0F &&
                                C.Codepoint >= 0x20 && !IsClusterExtender(C.Codepoint);
+            // A glyph the window draws 2 cells wide may cover the next cell when that one is blank
+            // in the same colors (the usual case: "● text", " — "); otherwise it gets a narrow stand-in.
+            bool32 OuterWider = !(C.Flags & CELL_WIDE) && !EmojiPair && std::binary_search(OuterWide.begin(), OuterWide.end(), C.Codepoint);
+            bool32 Cover = OuterWider && X + 1 < W && (Row[X + 1].Codepoint == 0 || Row[X + 1].Codepoint == ' ') && !Row[X + 1].Flags &&
+                           Row[X + 1].Bg == C.Bg && (Row[X + 1].Attr & ATTR_INVERSE) == (C.Attr & ATTR_INVERSE);
 
             bool32 Changed = Full || ForceNext || !CellEqual(Row[X], Old[X]) ||
-                             ((Wide || EmojiPair) && !CellEqual(Row[X + 1], Old[X + 1]));
+                             ((Wide || EmojiPair || OuterWider) && X + 1 < W && !CellEqual(Row[X + 1], Old[X + 1]));
             ForceNext = false;
             if(!Changed) { continue; }
 
@@ -1087,21 +1093,39 @@ static bool32 RenderFrame(std::string& Out, const frame& Prev, const frame& Next
                 Body += (char)('A' + (Cp - 0x1F1E6));
                 if(Wide) { Body += ' '; }
             }
+            else if(OuterWider && !Cover)
+            {
+                // No room for the window's 2-cell glyph: a narrow stand-in keeps the row aligned.
+                char Narrow = '*';
+                if(Cp == 0x2014 || Cp == 0x2015) { Narrow = '-'; }
+                else if(Cp >= 0x2024 && Cp <= 0x2026) { Narrow = '.'; }
+                else if(Cp == 0x2190 || Cp == 0x21D0) { Narrow = '<'; }
+                else if(Cp == 0x2192 || Cp == 0x21D2) { Narrow = '>'; }
+                else if(Cp == 0x2191 || Cp == 0x21D1) { Narrow = '^'; }
+                else if(Cp == 0x2193 || Cp == 0x21D3) { Narrow = 'v'; }
+                else if(Cp == 0x2194 || Cp == 0x21D4) { Narrow = '-'; }
+                else if(Cp == 0x2195) { Narrow = '|'; }
+                else if(Cp >= 0x2460 && Cp <= 0x2468) { Narrow = (char)('1' + (Cp - 0x2460)); } // ①..⑨
+                Body += Narrow;
+            }
             else
             {
                 AppendUtf8(Body, Cp);
                 if(EmojiPair) { AppendUtf8(Body, 0xFE0F); }
-                Uncertain = EmojiPair || OuterWidthMayDiffer(Cp);
+                Uncertain = (EmojiPair || OuterWidthMayDiffer(Cp)) && !Cover;
             }
 
             // After a glyph whose drawn width isn't certain, re-sync the cursor and repaint the next
-            // cell too, in case it got covered (new glyph) or blanked (overwritten old glyph).
+            // cell too, in case it got covered (new glyph) or blanked (overwritten old glyph). The
+            // same goes for an old glyph the window drew 2 wide. A covering glyph re-syncs too, so the
+            // rest of the row lands right even if the window's measured width was wrong.
             s32 Cells = (Wide || EmojiPair) ? 2 : 1;
-            CurX = Uncertain ? -1 : X + Cells;
+            CurX = (Uncertain || Cover) ? -1 : X + Cells;
             CurY = Y;
             if(CurX >= W) { CurX = -1; }
-            ForceNext = Uncertain || (Old && OuterWidthMayDiffer(Old[X].Codepoint));
-            if(EmojiPair) { X += 1; }
+            bool32 OldWider = Old && std::binary_search(OuterWide.begin(), OuterWide.end(), Old[X].Codepoint);
+            ForceNext = Uncertain || (Old && OuterWidthMayDiffer(Old[X].Codepoint)) || (OldWider && !Cover);
+            if(EmojiPair || Cover) { X += 1; }
         }
     }
 

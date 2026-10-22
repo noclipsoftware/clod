@@ -385,6 +385,7 @@ static int ServerMain()
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
     u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
     std::string OuterTitle;
+    std::vector<u32> OuterWide;  // sorted codepoints the attached console draws 2 cells wide where CharWidth says 1
     s32 OuterMouse = -1;        // mouse tracking mode currently requested from the client's terminal
     tab* FocusedTab = 0;        // compared by address only; may dangle after a close
     std::string TrayTip;
@@ -481,8 +482,17 @@ static int ServerMain()
                     Prev = frame{};
                     OuterMouse = -1;
                     OuterTitle.clear();
+                    OuterWide.clear();
                     ForceFull = true;
                     ResizeAtMs = NowMs;
+                    Dirty = true;
+                }
+                else if(Type == MSG_WIDTHS && Attached)
+                {
+                    // The window's own character widths: repaint everything with them.
+                    OuterWide.assign((const u32*)Payload.data(), (const u32*)(Payload.data() + Payload.size() / 4 * 4));
+                    std::sort(OuterWide.begin(), OuterWide.end());
+                    ForceFull = true;
                     Dirty = true;
                 }
                 else if(Type == MSG_INPUT && Attached)
@@ -821,7 +831,7 @@ static int ServerMain()
                 OutBytes += "\x1b]0;" + Title + "\x07";
                 OuterTitle = Title;
             }
-            RenderFrame(OutBytes, Prev, Next, ForceFull);
+            RenderFrame(OutBytes, Prev, Next, ForceFull, OuterWide);
             if(!OutBytes.empty() && !IpcSendString(Client, MSG_OUTPUT, OutBytes)) { IpcClose(Client); Attached = false; }
             std::swap(Prev, Next);
             ForceFull = false;

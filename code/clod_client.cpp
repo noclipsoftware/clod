@@ -1,6 +1,8 @@
 // Client: the console window. Relays console input to the server and server output to the console.
 // Closing the window only ends this process; the server keeps every tab running.
 
+#include "clod_ambiguous.h"
+
 static void ConsoleWrite(HANDLE Out, const std::string& S)
 {
     size_t At = 0;
@@ -130,6 +132,55 @@ static int ClientMain(s32 JumpToTab)
         IpcSendString(Server, MSG_ATTACH, Payload);
     }
 
+    // --- which ambiguous-width characters this console draws 2 cells wide ---
+    // A classic console window sizes these by its font (Windows Terminal doesn't), while the consoles
+    // behind the tabs make them 1 cell. Measured after attaching, in an off-screen buffer, so the
+    // first frame isn't held up; the server repaints once it knows.
+    {
+        std::vector<u32> Wide;
+        HANDLE Probe = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, 0, CONSOLE_TEXTMODE_BUFFER, 0);
+        if(Probe != INVALID_HANDLE_VALUE)
+        {
+            COORD ProbeSize = {16, 2};
+            SetConsoleScreenBufferSize(Probe, ProbeSize);
+            for(u32 R = 0; R < ArrayCount(AmbiguousWidth); ++R)
+            {
+                for(u32 Cp = AmbiguousWidth[R][0]; Cp <= AmbiguousWidth[R][1]; ++Cp)
+                {
+                    if(CharWidth(Cp) != 1) { continue; }
+                    wchar_t S[2] = {(wchar_t)Cp, 0};
+                    DWORD Len = 1;
+                    if(Cp >= 0x10000) { S[0] = (wchar_t)(0xD800 + ((Cp - 0x10000) >> 10)); S[1] = (wchar_t)(0xDC00 + ((Cp - 0x10000) & 0x3FF)); Len = 2; }
+                    COORD Origin = {0, 0};
+                    SetConsoleCursorPosition(Probe, Origin);
+                    DWORD Written = 0;
+                    WriteConsoleW(Probe, S, Len, &Written, 0);
+                    CONSOLE_SCREEN_BUFFER_INFO Info = {};
+                    GetConsoleScreenBufferInfo(Probe, &Info);
+                    if(Info.dwCursorPosition.X == 2) { Wide.push_back(Cp); }
+                }
+            }
+            CloseHandle(Probe);
+        }
+        IpcSend(Server, MSG_WIDTHS, Wide.data(), (u32)(Wide.size() * sizeof(u32)));
+    }
+
+    // CLOD_CAPTURE=<file> appends what this window writes, for replaying a rendering bug with
+    // tools\replaycheck: records of u32 length + bytes; a length of 0xFFFFFFFF is a size record
+    // followed by s32 width and height.
+    FILE* Capture = 0;
+    {
+        wchar_t Path[MAX_PATH] = {};
+        if(GetEnvironmentVariableW(L"CLOD_CAPTURE", Path, MAX_PATH)) { Capture = _wfsopen(Path, L"ab", _SH_DENYWR); } // readable while capturing
+        if(Capture)
+        {
+            u32 Mark = 0xFFFFFFFF;
+            s32 Size[2] = {Width, Height};
+            fwrite(&Mark, 4, 1, Capture);
+            fwrite(Size, 4, 2, Capture);
+        }
+    }
+
     std::string Reason = "lost connection to the clod server";
     std::string InBytes;
     u32 Type = 0;
@@ -144,7 +195,17 @@ static int ClientMain(s32 JumpToTab)
         bool32 Alive = IpcPump(Server);
         while(IpcNextMessage(Server, Type, Payload))
         {
-            if(Type == MSG_OUTPUT) { ConsoleWrite(Out, Payload); }
+            if(Type == MSG_OUTPUT)
+            {
+                ConsoleWrite(Out, Payload);
+                if(Capture)
+                {
+                    u32 Len = (u32)Payload.size();
+                    fwrite(&Len, 4, 1, Capture);
+                    fwrite(Payload.data(), 1, Payload.size(), Capture);
+                    fflush(Capture);
+                }
+            }
             else if(Type == MSG_BYE) { Reason = Payload; Running = false; break; }
         }
         if(!Running || !Alive) { break; }
@@ -202,11 +263,19 @@ static int ClientMain(s32 JumpToTab)
             Width = NewW;
             Height = NewH;
             s32 Size[2] = {Width, Height};
+            if(Capture)
+            {
+                u32 Mark = 0xFFFFFFFF;
+                fwrite(&Mark, 4, 1, Capture);
+                fwrite(Size, 4, 2, Capture);
+                fflush(Capture);
+            }
             if(!IpcSend(Server, MSG_RESIZE, Size, sizeof(Size))) { break; }
         }
     }
 
     IpcClose(Server);
+    if(Capture) { fclose(Capture); }
     ConsoleWrite(Out, "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[?25h\x1b]0;\x07\x1b[?1049l");
     SetConsoleMode(Out, OldOut);
     SetConsoleMode(In, OldIn);

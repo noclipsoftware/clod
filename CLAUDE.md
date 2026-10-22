@@ -75,6 +75,18 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   - draws cluster extenders (ZWJ, combining, skin tones, keycap) as spaces;
   - spells regional indicators as letters;
   - re-syncs the cursor after glyphs whose outer width may differ (`OuterWidthMayDiffer`).
+- A classic console window (conhost: taskbar pin, tray, double-clicked exe) sizes East Asian
+  Ambiguous characters by its **font**: with e.g. Iosevka Extended, `— … ← → ● ○ ①` are 2 cells,
+  while ConPTY (no font) makes them 1. Unhandled, rows shift and the diff leaves stray letters.
+  So after attaching, the client measures the `code/clod_ambiguous.h` set (from
+  `tools/gen_ambiguous.py`) in an off-screen buffer and sends the 2-wide ones (`MSG_WIDTHS`;
+  empty in Windows Terminal). `RenderFrame` then lets such a glyph cover a following blank cell
+  of the same colors, else draws a narrow stand-in (`- . < > ^ v *`), and re-syncs the cursor.
+- To debug drift: `CLOD_CAPTURE=<file>` makes the client record what it writes, and
+  `tools/replaycheck.exe <capture> <report>` (build with `tools\build_replaycheck.bat`) replays
+  it in the console it runs in and reports the first frame leaving a stray character. Run it in
+  the same kind of window as the bug, e.g. launched directly (classic console, per-exe font in
+  `HKCU\Console\<exe path>`) or `wt.exe -w new --maximized`.
 
 ## Claude Code specifics
 

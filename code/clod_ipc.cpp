@@ -9,6 +9,7 @@ enum msg_type
     MSG_RESIZE, // client -> server: s32 Width, s32 Height
     MSG_OUTPUT, // server -> client: VT bytes for the console
     MSG_BYE,    // server -> client: reason text; the client restores its console and exits
+    MSG_WIDTHS, // client -> server: sorted u32 codepoints the client's console draws 2 cells wide where CharWidth says 1
 };
 
 struct msg_attach
