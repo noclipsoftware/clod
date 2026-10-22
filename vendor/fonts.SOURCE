@@ -1,7 +1,9 @@
 Iosevka Clod: Iosevka Term 34.9.0 (IosevkaTerm-Regular.ttf, IosevkaTerm-Bold.ttf from
 PkgTTF-IosevkaTerm-34.9.0.zip, https://github.com/be5invis/Iosevka/releases/tag/v34.9.0) with only
 its family name changed to "Iosevka Clod" by tools/make_font.py, so it installs next to any Iosevka
-the user already has.
+the user already has. Files are IosevkaClod-<version>-<style>.ttf so a new version installs beside
+the old one (which may be in use) and replaces it.
 
 Licensed under the SIL Open Font License 1.1 (vendor/fonts/LICENSE.md), which declares no Reserved
-Font Name. To upgrade: download a newer PkgTTF-IosevkaTerm zip and rerun tools/make_font.py.
+Font Name. To upgrade: download a newer PkgTTF-IosevkaTerm zip, rerun tools/make_font.py into
+vendor/fonts and delete the old version's files.

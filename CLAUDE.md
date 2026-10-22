@@ -32,6 +32,10 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   `InstallFonts` (server and clodw start) installs it per user for every app (no admin: copy to
   `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, HKCU Fonts key, `AddFontResourceW`, `WM_FONTCHANGE`),
   only what's missing. It's clodw's built-in default and the default `shell/settings.txt`'s `font`.
+  Files are `IosevkaClod-<version>-<style>.ttf`: another version installs under its own name (the
+  old file may be held by some app), the registry moves to it, and old files are deleted once free
+  (on a later start if locked; only when this clod ships the font). An install for all users (HKLM)
+  is left alone.
 - clodw text (stage 2): cells come from ConPTY one codepoint each, so clodw groups a base cell
   with the cells that join it (`IsClusterExtender`, what follows a ZWJ, a flag's second letter)
   and draws the cluster as one glyph across all of them (up to `GLYPH_MAX_CELLS`), leaving blank

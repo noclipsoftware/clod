@@ -102,35 +102,71 @@ static void SeedUserSetup()
     }
 }
 
-// clod's font, "Iosevka Clod" (build\fonts, from tools\make_font.py), installed for this user so every
-// app can use it: per-user fonts need no admin (Windows 10 1809+). Only what's missing is installed,
-// nothing is overwritten. Run by the server and by clodw, before it picks its font.
+// clod's font, "Iosevka Clod" (build\fonts\IosevkaClod-<version>-<style>.ttf, from tools\make_font.py),
+// installed for this user so every app can use it: per-user fonts need no admin (Windows 10 1809+).
+// A style already registered at this version is left alone, and so is one installed for all users.
+// Another version goes in under its own file name (the old file may be in use by some app), and old
+// files are deleted once nothing holds them, else on a later start. Run by the server and by clodw,
+// before it picks its font.
 static void InstallFonts()
 {
-    static const wchar_t* Files[][2] = {
-        {L"IosevkaClod-Regular.ttf", L"Iosevka Clod (TrueType)"},
-        {L"IosevkaClod-Bold.ttf", L"Iosevka Clod Bold (TrueType)"},
-    };
     wchar_t Local[MAX_PATH] = {};
     GetEnvironmentVariableW(L"LOCALAPPDATA", Local, MAX_PATH);
     std::wstring Dest = std::wstring(Local) + L"\\Microsoft\\Windows\\Fonts\\";
+    std::wstring Bundled = ExeDir() + L"fonts\\";
+    const wchar_t* KeyPath = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts";
+    static const wchar_t* Values[2] = {L"Iosevka Clod (TrueType)", L"Iosevka Clod Bold (TrueType)"};
     HKEY Key = 0;
-    if(RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, 0, 0,
-                       KEY_QUERY_VALUE | KEY_SET_VALUE, 0, &Key, 0) != ERROR_SUCCESS) { return; }
+    if(RegCreateKeyExW(HKEY_CURRENT_USER, KeyPath, 0, 0, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, 0, &Key, 0) != ERROR_SUCCESS) { return; }
+    HKEY Machine = 0;
+    RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyPath, 0, KEY_QUERY_VALUE, &Machine);
+
+    // --- each bundled style: install it unless this version is registered already ---
+    bool32 Shipped = false;
     bool32 Added = false;
-    for(u32 I = 0; I < ArrayCount(Files); ++I)
+    WIN32_FIND_DATAW Found = {};
+    HANDLE Find = FindFirstFileW((Bundled + L"IosevkaClod-*.ttf").c_str(), &Found);
+    for(bool32 More = Find != INVALID_HANDLE_VALUE; More; More = FindNextFileW(Find, &Found))
     {
-        std::wstring Src = ExeDir() + L"fonts\\" + Files[I][0];
-        std::wstring Dst = Dest + Files[I][0];
-        bool32 Registered = RegQueryValueExW(Key, Files[I][1], 0, 0, 0, 0) == ERROR_SUCCESS;
-        bool32 Present = GetFileAttributesW(Dst.c_str()) != INVALID_FILE_ATTRIBUTES;
-        if((Registered && Present) || GetFileAttributesW(Src.c_str()) == INVALID_FILE_ATTRIBUTES) { continue; }
+        Shipped = true;
+        std::wstring Name = Found.cFileName;
+        bool32 Bold = Name.size() > 9 && _wcsicmp(Name.c_str() + Name.size() - 9, L"-Bold.ttf") == 0;
+        const wchar_t* Value = Values[Bold ? 1 : 0];
+        wchar_t Old[MAX_PATH] = {};
+        DWORD Size = sizeof(Old) - sizeof(wchar_t);
+        bool32 Registered = RegQueryValueExW(Key, Value, 0, 0, (BYTE*)Old, &Size) == ERROR_SUCCESS;
+        bool32 ForEveryone = Machine && RegQueryValueExW(Machine, Value, 0, 0, 0, 0) == ERROR_SUCCESS;
+        std::wstring Dst = Dest + Name;
+        bool32 Current = Registered && _wcsicmp(Old, Dst.c_str()) == 0 && GetFileAttributesW(Dst.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if(ForEveryone || Current) { continue; }
         CreateDirectoryW(Dest.c_str(), 0);
-        if(!Present && !CopyFileW(Src.c_str(), Dst.c_str(), TRUE)) { continue; }
-        RegSetValueExW(Key, Files[I][1], 0, REG_SZ, (const BYTE*)Dst.c_str(), (DWORD)((Dst.size() + 1) * sizeof(wchar_t)));
+        CopyFileW((Bundled + Name).c_str(), Dst.c_str(), TRUE); // already there (an earlier try) is fine
+        if(GetFileAttributesW(Dst.c_str()) == INVALID_FILE_ATTRIBUTES) { continue; }
+        if(Registered && Old[0]) { RemoveFontResourceW(Old); }
+        RegSetValueExW(Key, Value, 0, REG_SZ, (const BYTE*)Dst.c_str(), (DWORD)((Dst.size() + 1) * sizeof(wchar_t)));
         AddFontResourceW(Dst.c_str());
         Added = true;
     }
+    if(Find != INVALID_HANDLE_VALUE) { FindClose(Find); }
+
+    // --- older versions' files: whatever of ours the registry no longer names (only when this clod
+    // ships the font, so a missing build\fonts never removes an installed one) ---
+    std::wstring Using[2];
+    for(u32 I = 0; I < 2; ++I)
+    {
+        wchar_t Path[MAX_PATH] = {};
+        DWORD Size = sizeof(Path) - sizeof(wchar_t);
+        if(RegQueryValueExW(Key, Values[I], 0, 0, (BYTE*)Path, &Size) == ERROR_SUCCESS) { Using[I] = Path; }
+    }
+    Find = Shipped ? FindFirstFileW((Dest + L"IosevkaClod-*.ttf").c_str(), &Found) : INVALID_HANDLE_VALUE;
+    for(bool32 More = Find != INVALID_HANDLE_VALUE; More; More = FindNextFileW(Find, &Found))
+    {
+        std::wstring Path = Dest + Found.cFileName;
+        if(_wcsicmp(Path.c_str(), Using[0].c_str()) != 0 && _wcsicmp(Path.c_str(), Using[1].c_str()) != 0) { DeleteFileW(Path.c_str()); }
+    }
+    if(Find != INVALID_HANDLE_VALUE) { FindClose(Find); }
+    if(Machine) { RegCloseKey(Machine); }
     RegCloseKey(Key);
     if(Added) { PostMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0); } // running apps refresh their font lists
 }
+
