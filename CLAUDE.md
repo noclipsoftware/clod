@@ -134,6 +134,13 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   as UTF-16 with a BOM; a restored shell's cmd chain starts with `type` of that file, so it shows
   above the new prompt. The id (`tab::HistoryId`) is the shell line's second field in `tabs.txt`.
   Closing a tab deletes its file; startup deletes files no tab uses.
+- A shell tab follows its cd: the claude scan thread also reads each cmd's current directory from
+  its process parameters (`ProcessCurrentDirectory`, PEB) into `tab::Cwd`, so tabs.txt brings it
+  back in that folder.
+- Up-arrow history per tab: each cmd gets `CLINK_HISTORY_LABEL` = the tab's lasting id without
+  dashes (session id, else `HistoryId`), so clink keeps `clink_history-<label>` in the profile, and
+  the default `clink_settings` has `history.shared = True` so every command is written at once
+  (clod's shutdown closes consoles; clink would otherwise save only on a clean exit).
 - A shell tab is named for what it runs: cmd titles itself `<path>\cmd.exe - <command>` for
   external programs (`RunningCommand` tidies it and ignores clod's own startup steps), and the
   tab keeps the last such command (`tab::LastCommand`) once idle; before any, `cmd <folder>`.

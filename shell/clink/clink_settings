@@ -7,3 +7,7 @@ clink.autoupdate = off
 # type: enum
 # options: off,on,auto
 terminal.mouse_input = off
+
+# name: Share history between instances
+# type: boolean
+history.shared = True

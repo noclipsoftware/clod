@@ -72,13 +72,39 @@ static bool32 ReadClaudeSession(DWORD Pid, std::string& Id, std::string& Cwd)
     return true;
 }
 
-// One tab's answer from a process scan: the claude running somewhere under its cmd, if any.
+// A process's current directory (where a shell has cd'd to), read from its process parameters
+// (PEB -> RTL_USER_PROCESS_PARAMETERS.CurrentDirectory, 64-bit layout). Empty if it can't be read.
+static std::string ProcessCurrentDirectory(DWORD Pid)
+{
+    typedef LONG (WINAPI *query_fn)(HANDLE, PROCESSINFOCLASS, void*, ULONG, ULONG*);
+    static query_fn Query = (query_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    HANDLE Proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Pid);
+    if(!Proc || !Query) { if(Proc) { CloseHandle(Proc); } return std::string(); }
+    PROCESS_BASIC_INFORMATION Basic = {};
+    u64 Params = 0;
+    UNICODE_STRING Dir = {};
+    wchar_t Buf[MAX_PATH + 1] = {};
+    bool32 Ok = Query(Proc, ProcessBasicInformation, &Basic, sizeof(Basic), 0) >= 0 &&
+                ReadProcessMemory(Proc, (u8*)Basic.PebBaseAddress + 0x20, &Params, sizeof(Params), 0) &&
+                ReadProcessMemory(Proc, (u8*)(uintptr_t)Params + 0x38, &Dir, sizeof(Dir), 0) &&
+                Dir.Length > 0 && Dir.Length <= MAX_PATH * sizeof(wchar_t) &&
+                ReadProcessMemory(Proc, Dir.Buffer, Buf, Dir.Length, 0);
+    CloseHandle(Proc);
+    if(!Ok) { return std::string(); }
+    std::wstring Path(Buf, Dir.Length / sizeof(wchar_t));
+    if(Path.size() > 3 && Path.back() == L'\\') { Path.pop_back(); } // "C:\foo\" -> "C:\foo", "C:\" stays
+    return WideToUtf8(Path);
+}
+
+// One tab's answer from a process scan: the claude running somewhere under its cmd, if any, and
+// the folder the cmd itself is in.
 struct claude_find
 {
     DWORD CmdPid;
     DWORD Pid;       // 0 = none
     std::string Id;
     std::string Cwd;
+    std::string ShellCwd;
 };
 
 // A process scan handed to its own thread: CmdPids in, Finds out, then Done and the loop's Wake.
@@ -116,6 +142,7 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
         }
         claude_find F = {};
         F.CmdPid = CmdPid;
+        F.ShellCwd = ProcessCurrentDirectory(CmdPid);
         for(size_t K = 1; K < Tree.size() && !F.Pid; ++K)
         {
             if(ReadClaudeSession(Tree[K], F.Id, F.Cwd)) { F.Pid = Tree[K]; }
@@ -231,7 +258,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         L"CLAUDECODE", L"CLAUDE_CODE_CHILD_SESSION", L"CLAUDE_CODE_SESSION_ID", L"CLAUDE_CODE_SESSION_ATTENDED",
         L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
         L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
-        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE",
+        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL",
     };
     std::wstring Env;
     wchar_t* Block = GetEnvironmentStringsW();
@@ -244,6 +271,13 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         if(!Drop) { Env.append(Var); Env.push_back(0); }
     }
     FreeEnvironmentStringsW(Block);
+    // Each tab keeps its own clink history (clink_history_<label> in the profile), so up-arrow in a
+    // tab brought back after a restart recalls that tab's commands. The label is the tab's lasting
+    // id without dashes (clink allows 32 letters and digits): the session, else the shell's history id.
+    std::wstring Label;
+    for(char Ch : Tab.SessionId.empty() ? Tab.HistoryId : Tab.SessionId) { if(isalnum((u8)Ch) && Label.size() < 32) { Label += (wchar_t)Ch; } }
+    Env += L"CLINK_HISTORY_LABEL=" + Label;
+    Env.push_back(0);
     Env.push_back(0);
 
     std::string Error;
@@ -1002,6 +1036,13 @@ static int ServerMain()
                 const claude_find* Find = 0;
                 for(const claude_find& F : Scan->Finds) { if(F.CmdPid == GetProcessId(T->Pty->Process)) { Find = &F; } }
                 if(!Find) { continue; } // opened after the scan started
+                // A shell's folder follows its cd, so it comes back there after a restart (tabs.txt).
+                if(T->SessionId.empty() && !Find->Pid && !Find->ShellCwd.empty() && Find->ShellCwd != T->Cwd)
+                {
+                    T->Cwd = Find->ShellCwd;
+                    T->Project = ProjectName(Find->ShellCwd);
+                    Dirty = true;
+                }
                 if(Find->Pid)
                 {
                     if(Find->Id != T->SessionId) { T->SessionId = Find->Id; T->Title.clear(); Dirty = true; }

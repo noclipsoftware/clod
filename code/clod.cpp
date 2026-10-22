@@ -16,6 +16,7 @@
 #include <shellapi.h>
 #include <sddl.h>
 #include <tlhelp32.h>
+#include <winternl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>
