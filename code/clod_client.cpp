@@ -1,0 +1,217 @@
+// Client: the console window. Relays console input to the server and server output to the console.
+// Closing the window only ends this process; the server keeps every tab running.
+
+static void ConsoleWrite(HANDLE Out, const std::string& S)
+{
+    size_t At = 0;
+    while(At < S.size())
+    {
+        DWORD Written = 0;
+        if(!WriteFile(Out, S.data() + At, (DWORD)(S.size() - At), &Written, 0) || Written == 0) { break; }
+        At += Written;
+    }
+}
+
+static void ConsoleSize(HANDLE Out, s32* W, s32* H)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info = {};
+    if(GetConsoleScreenBufferInfo(Out, &Info))
+    {
+        *W = Info.srWindow.Right - Info.srWindow.Left + 1;
+        *H = Info.srWindow.Bottom - Info.srWindow.Top + 1;
+    }
+}
+
+static BOOL WINAPI ClientCtrlHandler(DWORD Type)
+{
+    // Ctrl+C reaches us as input (processed input is off); swallow the break events.
+    return Type == CTRL_C_EVENT || Type == CTRL_BREAK_EVENT;
+}
+
+// Connects to the running server, starting one if there is none. Returns null on failure.
+static HANDLE ConnectToServer(std::string& Error)
+{
+    std::wstring Name = PipeName();
+    bool32 Spawned = false;
+    u64 Deadline = GetTickCount64() + 5000;
+    for(;;)
+    {
+        HANDLE Pipe = CreateFileW(Name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
+        if(Pipe != INVALID_HANDLE_VALUE) { return Pipe; }
+        DWORD Err = GetLastError();
+        if(Err == ERROR_PIPE_BUSY)
+        {
+            WaitNamedPipeW(Name.c_str(), 500);
+        }
+        else if(!Spawned)
+        {
+            // --- start the background server, outside this console and outside any job that would kill it ---
+            wchar_t Exe[MAX_PATH] = {};
+            GetModuleFileNameW(0, Exe, MAX_PATH);
+            std::wstring Cmd = std::wstring(L"\"") + Exe + L"\" --server";
+            wchar_t Home[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+            STARTUPINFOW Si = {};
+            Si.cb = sizeof(Si);
+            PROCESS_INFORMATION Pi = {};
+            DWORD Flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+            BOOL Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags | CREATE_BREAKAWAY_FROM_JOB, 0, Home, &Si, &Pi);
+            if(!Ok) { Ok = CreateProcessW(0, &Cmd[0], 0, 0, FALSE, Flags, 0, Home, &Si, &Pi); }
+            if(!Ok)
+            {
+                Error = "could not start the clod server (error " + std::to_string(GetLastError()) + ")";
+                return 0;
+            }
+            CloseHandle(Pi.hThread);
+            CloseHandle(Pi.hProcess);
+            Spawned = true;
+        }
+        else
+        {
+            Sleep(30);
+        }
+        if(GetTickCount64() > Deadline)
+        {
+            Error = "the clod server did not start";
+            return 0;
+        }
+    }
+}
+
+static int ClientMain(s32 JumpToTab)
+{
+    HANDLE In = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE Out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD OldIn = 0, OldOut = 0;
+    if(!GetConsoleMode(In, &OldIn) || !GetConsoleMode(Out, &OldOut))
+    {
+        fprintf(stderr, "clod needs a Windows console. From mintty/Git Bash run it via `winpty clod`, or use Windows Terminal or cmd.exe.\n");
+        return 1;
+    }
+
+    std::string Error;
+    HANDLE Pipe = ConnectToServer(Error);
+    if(!Pipe)
+    {
+        fprintf(stderr, "clod: %s\n", Error.c_str());
+        return 1;
+    }
+    static ipc_conn Server = {};
+    IpcInit(Server, Pipe);
+
+    UINT OldCp = GetConsoleOutputCP();
+    UINT OldInCp = GetConsoleCP();
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    if(!SetConsoleMode(Out, ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN) ||
+       !SetConsoleMode(In, ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT))
+    {
+        SetConsoleMode(Out, OldOut);
+        SetConsoleMode(In, OldIn);
+        fprintf(stderr, "clod: this console doesn't support virtual terminal sequences (needs Windows 10 1809+).\n");
+        return 1;
+    }
+    SetConsoleCtrlHandler(ClientCtrlHandler, TRUE);
+    ConsoleWrite(Out, "\x1b[?1049h\x1b[?7l\x1b[?2004h");
+
+    // --- attach ---
+    s32 Width = 80, Height = 24;
+    ConsoleSize(Out, &Width, &Height);
+    {
+        msg_attach A = {};
+        A.Width = Width;
+        A.Height = Height;
+        A.JumpToTab = JumpToTab;
+        A.ConsoleWindow = (u64)(uintptr_t)GetConsoleWindow();
+        wchar_t Cwd[MAX_PATH] = {};
+        GetCurrentDirectoryW(MAX_PATH, Cwd);
+        std::string Payload((const char*)&A, sizeof(A));
+        Payload += WideToUtf8(Cwd);
+        IpcSendString(Server, MSG_ATTACH, Payload);
+    }
+
+    std::string Reason = "lost connection to the clod server";
+    std::string InBytes;
+    u32 Type = 0;
+    std::string Payload;
+    bool32 Running = IpcPump(Server);
+    while(Running)
+    {
+        HANDLE Waits[2] = {In, Server.ReadEvent};
+        WaitForMultipleObjects(2, Waits, FALSE, 250);
+
+        // --- server output; messages that arrived just before a hang-up (like BYE) still count ---
+        bool32 Alive = IpcPump(Server);
+        while(IpcNextMessage(Server, Type, Payload))
+        {
+            if(Type == MSG_OUTPUT) { ConsoleWrite(Out, Payload); }
+            else if(Type == MSG_BYE) { Reason = Payload; Running = false; break; }
+        }
+        if(!Running || !Alive) { break; }
+
+        // --- console input as one VT byte stream ---
+        InBytes.clear();
+        DWORD Count = 0;
+        while(GetNumberOfConsoleInputEvents(In, &Count) && Count > 0)
+        {
+            INPUT_RECORD Recs[256];
+            DWORD Read = 0;
+            if(!ReadConsoleInputW(In, Recs, ArrayCount(Recs), &Read)) { break; }
+            std::wstring Wide;
+            for(DWORD I = 0; I < Read; ++I)
+            {
+                INPUT_RECORD& R = Recs[I];
+                if(R.EventType == KEY_EVENT && R.Event.KeyEvent.bKeyDown && R.Event.KeyEvent.uChar.UnicodeChar)
+                {
+                    for(WORD K = 0; K < Max(R.Event.KeyEvent.wRepeatCount, 1); ++K) { Wide += R.Event.KeyEvent.uChar.UnicodeChar; }
+                }
+                else if(R.EventType == MOUSE_EVENT)
+                {
+                    // Consoles that report mouse as records instead of VT: synthesize SGR mouse sequences.
+                    const MOUSE_EVENT_RECORD& M = R.Event.MouseEvent;
+                    CONSOLE_SCREEN_BUFFER_INFO Info = {};
+                    GetConsoleScreenBufferInfo(Out, &Info);
+                    s32 MX = M.dwMousePosition.X - Info.srWindow.Left + 1;
+                    s32 MY = M.dwMousePosition.Y - Info.srWindow.Top + 1;
+                    wchar_t Buf[64] = {};
+                    if(M.dwEventFlags & MOUSE_WHEELED)
+                    {
+                        swprintf(Buf, 64, L"\x1b[<%d;%d;%dM", ((s32)M.dwButtonState >> 16) > 0 ? 64 : 65, MX, MY);
+                    }
+                    else if(M.dwEventFlags == 0 || M.dwEventFlags == DOUBLE_CLICK)
+                    {
+                        bool32 Down = (M.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
+                        swprintf(Buf, 64, L"\x1b[<0;%d;%d%c", MX, MY, Down ? L'M' : L'm');
+                    }
+                    Wide += Buf;
+                }
+                else if(R.EventType == FOCUS_EVENT)
+                {
+                    Wide += R.Event.FocusEvent.bSetFocus ? L"\x1b[I" : L"\x1b[O";
+                }
+            }
+            InBytes += WideToUtf8(Wide);
+        }
+        if(!InBytes.empty() && !IpcSendString(Server, MSG_INPUT, InBytes)) { break; }
+
+        // --- window size: polled, since not every console reports window-only resizes ---
+        s32 NewW = Width, NewH = Height;
+        ConsoleSize(Out, &NewW, &NewH);
+        if(NewW != Width || NewH != Height)
+        {
+            Width = NewW;
+            Height = NewH;
+            s32 Size[2] = {Width, Height};
+            if(!IpcSend(Server, MSG_RESIZE, Size, sizeof(Size))) { break; }
+        }
+    }
+
+    IpcClose(Server);
+    ConsoleWrite(Out, "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[0m\x1b[?25h\x1b]0;\x07\x1b[?1049l");
+    SetConsoleMode(Out, OldOut);
+    SetConsoleMode(In, OldIn);
+    SetConsoleOutputCP(OldCp);
+    SetConsoleCP(OldInCp);
+    if(!Reason.empty()) { fprintf(stderr, "clod: %s\n", Reason.c_str()); }
+    return 0;
+}

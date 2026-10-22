@@ -1,0 +1,41 @@
+@echo off
+setlocal
+rem Unity build of clod with MSVC. Run from any shell; sets up the VS environment if needed.
+rem   build          optimized
+rem   build debug    unoptimized, debug CRT
+
+where cl >nul 2>nul
+if not errorlevel 1 goto :build
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+for /f "usebackq delims=" %%i in (`call "%VSWHERE%" -latest -products * -property installationPath`) do set "VSDIR=%%i"
+call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
+
+:build
+set "ROOT=%~dp0"
+if not exist "%ROOT%build" mkdir "%ROOT%build"
+pushd "%ROOT%build"
+
+set FLAGS=/nologo /std:c++20 /utf-8 /EHsc /W4 /wd4100 /wd4505 /wd4201 /Zi /FC
+set OPT=/O2 /MT
+if "%1"=="debug" set OPT=/Od /MTd
+
+rem --- icon: drawn by tools\make_icon.cpp, then compiled into a resource for the exe ---
+cl %FLAGS% /O2 /MT "%ROOT%tools\make_icon.cpp" /Fe:make_icon.exe /link /INCREMENTAL:NO user32.lib gdi32.lib >nul
+if errorlevel 1 (set ERR=1& goto :done)
+"%ROOT%build\make_icon.exe" clod.ico
+if errorlevel 1 (set ERR=1& goto :done)
+rc /nologo /i "%ROOT%build" /fo clod.res "%ROOT%code\clod.rc"
+if errorlevel 1 (set ERR=1& goto :done)
+
+rem --- a running clod locks clod.exe, but Windows still lets it be renamed: move it aside so the ---
+rem --- new build can land while the old one keeps running. Old copies go once nothing uses them. ---
+del /q clod.old-*.exe >nul 2>nul
+if exist clod.exe del /q clod.exe >nul 2>nul
+if exist clod.exe move /y clod.exe clod.old-%RANDOM%.exe >nul
+
+cl %FLAGS% %OPT% "%ROOT%code\clod.cpp" clod.res /Fe:clod.exe /link /INCREMENTAL:NO /OPT:REF /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib
+set ERR=%errorlevel%
+
+:done
+popd
+exit /b %ERR%
