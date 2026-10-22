@@ -49,6 +49,29 @@ static std::wstring UserClodDir()
     return std::wstring(Home) + L"\\.clod\\";
 }
 
+// The session a running claude registered in <ClaudeConfigDir>\sessions\<pid>.json. False when
+// there's no such file, it names no session, or it's left over from an earlier process that had
+// the same pid (its recorded start time differs).
+static bool32 ReadClaudeSession(DWORD Pid, std::string& Id, std::string& Cwd)
+{
+    std::wstring Path = ClaudeConfigDir() + L"\\sessions\\" + std::to_wstring(Pid) + L".json";
+    HANDLE File = CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+    if(File == INVALID_HANDLE_VALUE) { return false; }
+    std::string Json = ReadFileRange(File, 0, 64 * 1024);
+    CloseHandle(File);
+    std::string Start;
+    HANDLE Proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+    FILETIME Created = {}, Ignored[3] = {};
+    bool32 Timed = Proc && GetProcessTimes(Proc, &Created, &Ignored[0], &Ignored[1], &Ignored[2]);
+    if(Proc) { CloseHandle(Proc); }
+    u64 CreatedFt = ((u64)Created.dwHighDateTime << 32) | Created.dwLowDateTime;
+    if(JsonFindString(Json, "procStart", false, Start) && Timed && Start != std::to_string(CreatedFt)) { return false; }
+    if(!JsonFindString(Json, "sessionId", false, Id) || Id.empty()) { return false; }
+    Cwd.clear();
+    JsonFindString(Json, "cwd", false, Cwd);
+    return true;
+}
+
 // Where a tab's recent output is kept across server restarts: %LOCALAPPDATA%\clod\history\<id>.txt.
 static std::wstring HistoryPath(const std::string& Id)
 {
@@ -441,6 +464,37 @@ static int ServerMain()
     if(!Ephemeral)
     {
         std::string Saved = ReadTabsFile();
+
+        // --- let claudes from the previous server finish exiting first (a quick quit-and-reopen):
+        // resumed next to a still-live process of the same session, Claude renames the session ---
+        {
+            std::vector<std::string> Resuming;
+            for(size_t At = 0; At < Saved.size();)
+            {
+                size_t End = Saved.find('\n', At);
+                if(End == std::string::npos) { End = Saved.size(); }
+                std::vector<std::string> F = SplitTabs(Saved.substr(At, End - At));
+                if(F.size() >= 2 && F[0] == "tab") { Resuming.push_back(F[1]); }
+                At = End + 1;
+            }
+            std::vector<HANDLE> Still;
+            WIN32_FIND_DATAW Found = {};
+            HANDLE Find = Resuming.empty() ? INVALID_HANDLE_VALUE : FindFirstFileW((ClaudeConfigDir() + L"\\sessions\\*.json").c_str(), &Found);
+            while(Find != INVALID_HANDLE_VALUE)
+            {
+                DWORD Pid = (DWORD)_wtoi(Found.cFileName);
+                std::string Id;
+                std::string Cwd;
+                if(Pid && ReadClaudeSession(Pid, Id, Cwd) && std::find(Resuming.begin(), Resuming.end(), Id) != Resuming.end() && Still.size() < MAXIMUM_WAIT_OBJECTS)
+                {
+                    HANDLE Proc = OpenProcess(SYNCHRONIZE, FALSE, Pid);
+                    if(Proc) { Still.push_back(Proc); }
+                }
+                if(!FindNextFileW(Find, &Found)) { FindClose(Find); break; }
+            }
+            if(!Still.empty()) { WaitForMultipleObjects((DWORD)Still.size(), Still.data(), TRUE, 15000); }
+            for(HANDLE Proc : Still) { CloseHandle(Proc); }
+        }
         s32 SavedActive = 0;
         std::vector<std::string> SavedLayout;
         size_t At = 0;
@@ -849,7 +903,6 @@ static int ServerMain()
         {
             ClaudeScanMs = NowMs;
             std::vector<PROCESSENTRY32W> Procs = ListProcesses();
-            std::wstring SessionsDir = ClaudeConfigDir() + L"\\sessions\\";
             for(tab* T : App.Tabs)
             {
                 if(!T->Pty || T->Exited) { continue; }
@@ -866,24 +919,7 @@ static int ServerMain()
                 std::string Cwd;
                 for(size_t K = 1; K < Tree.size() && !Pid; ++K)
                 {
-                    HANDLE File = CreateFileW((SessionsDir + std::to_wstring(Tree[K]) + L".json").c_str(), GENERIC_READ,
-                                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
-                    if(File == INVALID_HANDLE_VALUE) { continue; }
-                    std::string Json = ReadFileRange(File, 0, 64 * 1024);
-                    CloseHandle(File);
-                    // A stale file from an earlier process with the same pid has another start time.
-                    std::string Start;
-                    HANDLE Proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Tree[K]);
-                    FILETIME Created = {}, Ignored[3] = {};
-                    bool32 Timed = Proc && GetProcessTimes(Proc, &Created, &Ignored[0], &Ignored[1], &Ignored[2]);
-                    if(Proc) { CloseHandle(Proc); }
-                    u64 CreatedFt = ((u64)Created.dwHighDateTime << 32) | Created.dwLowDateTime;
-                    if(JsonFindString(Json, "procStart", false, Start) && Timed && Start != std::to_string(CreatedFt)) { continue; }
-                    if(JsonFindString(Json, "sessionId", false, Id) && !Id.empty())
-                    {
-                        JsonFindString(Json, "cwd", false, Cwd);
-                        Pid = Tree[K];
-                    }
+                    if(ReadClaudeSession(Tree[K], Id, Cwd)) { Pid = Tree[K]; }
                 }
                 if(Pid)
                 {
@@ -1010,13 +1046,27 @@ static int ServerMain()
     std::string Count = std::to_string(App.Tabs.size()) + " tab" + (App.Tabs.size() == 1 ? "" : "s");
     DropClient(Client, Ephemeral ? "test instance ended" : "clod quit from the tray; " + Count + " will reopen the next time you run clod");
     if(!Ephemeral) { TrayDestroy(Tray); }
+    // Let go of the pipe now: a quick reopen starts the next server at once instead of waiting
+    // on this one (which then waits out these claudes before resuming the same sessions).
+    CloseHandle(Listen);
+    Listen = INVALID_HANDLE_VALUE;
     for(tab* T : App.Tabs) { if(T->Pty) { ClosePseudoConsole(T->Pty->Console); T->Pty->Console = 0; } }
+    // Give each claude a moment to exit on its own (saving, and removing its session file) before
+    // the job takes down whatever is left.
+    std::vector<HANDLE> Claudes;
+    for(tab* T : App.Tabs)
+    {
+        HANDLE Proc = T->ClaudePid ? OpenProcess(SYNCHRONIZE, FALSE, T->ClaudePid) : 0;
+        if(Proc && Claudes.size() < MAXIMUM_WAIT_OBJECTS) { Claudes.push_back(Proc); }
+        else if(Proc) { CloseHandle(Proc); }
+    }
+    if(!Claudes.empty()) { WaitForMultipleObjects((DWORD)Claudes.size(), Claudes.data(), TRUE, 5000); }
+    for(HANDLE Proc : Claudes) { CloseHandle(Proc); }
     for(tab* T : App.Tabs)
     {
         PtyClose(T->Pty);
         delete T;
     }
-    CloseHandle(Listen);
     CloseHandle(ConnectEvent);
     CloseHandle(Wake);
     CloseHandle(Job);

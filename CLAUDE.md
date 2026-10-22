@@ -75,6 +75,11 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   Changing a default in `shell/` doesn't reach an existing `~\.clod`; to see it, edit `~\.clod`
   or delete the file plus `init.bat` to reseed. Keep `clink.autoupdate = off` in the default
   `clink_settings`: the binaries are the vendored copy.
+- Never resume a session while an older claude of it is still alive: Claude then thinks another
+  live session has its name and renames this one for good. So shutdown closes the pipe first,
+  closes every console and waits (5 s) for the claudes to exit on their own, and startup waits
+  (15 s) for any live process registered under a session it's about to resume
+  (`ReadClaudeSession` on `<ClaudeConfigDir>\sessions\*.json`).
 - Shell tabs keep their recent output across a server restart: every 30 s and at shutdown the
   last 200 lines (`HistoryText`, with colors) go to `%LOCALAPPDATA%\clod\history<instance>\<id>.txt`
   as UTF-16 with a BOM; a restored shell's cmd chain starts with `type` of that file, so it shows
