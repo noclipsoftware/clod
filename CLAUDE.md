@@ -40,6 +40,13 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
     `MouseMode` there is the server's own wish, always on, so it can't tell). A plain selection
     still reports its press/release so the server focuses the pane. Ctrl+C copies when there's a
     selection (else it's ^C for the program), Ctrl+Shift+C copies, typing or clicking clears it.
+    A finished selection is copied at once (`copy_on_select = off` in settings.txt stops that);
+    right-click pastes and is never reported to programs (Claude's fullscreen has no use for it).
+  - Zoom: Ctrl+= / Ctrl+- / Ctrl+wheel change the font size for this window only; Ctrl+0 goes
+    back to settings.txt's size.
+  - Turn finished (and OSC 9/777, bell): the tray balloon fires when the tab isn't on screen or
+    the client window isn't in the foreground; for clodw the server also sends BEL, which flashes
+    its taskbar button while it's in the background.
   - Clink's `terminal.mouse_input` must stay `off` in the default `clink_settings`: its `auto`
     turns on mouse input under ConPTY, which makes the shell pane take the mouse.
   - The window's place (normal rect + maximized) is saved on exit to

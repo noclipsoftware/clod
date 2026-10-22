@@ -913,7 +913,11 @@ static int ServerMain()
                 Ended.push_back(T);
             }
 
-            bool32 Unseen = !Attached || PaneShowing(App, T) < 0;
+            // Unseen: no window, the tab isn't in a pane, or the window is behind others. clodw also
+            // flashes its taskbar button (it does that on BEL while not in the foreground).
+            HWND ClientRoot = ClientWindow ? GetAncestor(ClientWindow, GA_ROOTOWNER) : 0;
+            bool32 Unseen = !Attached || PaneShowing(App, T) < 0 || (ClientRoot && GetForegroundWindow() != ClientRoot);
+            if(!Why.empty() && ClientCells && Why != "Bell" && Why != "Claude needs your attention") { ToClient += "\x07"; }
             if(!Why.empty() && Unseen && NowMs - T->NotifiedAtMs > 10000)
             {
                 TrayNotify(Tray, TabName(*T), Why, I + 1);

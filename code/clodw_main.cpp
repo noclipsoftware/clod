@@ -11,6 +11,7 @@ struct clodw
     ipc_conn* Server;
     std::wstring FontFamily;
     float FontPt;
+    float FontPtSaved;     // the size in settings.txt; zoom changes only FontPt
     u32 Dpi;
 
     // --- the grid as the server last sent it ---
@@ -54,6 +55,7 @@ struct clodw
     s32 MouseY;
     s32 WheelAccum;
     bool32 Quit;
+    bool32 CopyOnSelectOff; // settings "copy_on_select = off": a finished selection isn't copied
     bool32 KeepActiveOff;  // settings "keep_active = off": don't hold off Windows' idle (Slack's away)
     bool32 Keeping;        // keeping the user active right now (the bar's light shows it)
     std::string ByeReason;
@@ -119,6 +121,54 @@ static void SetClipboardText(HWND Window, const std::string& Utf8)
     if(!OpenClipboard(Window)) { GlobalFree(Mem); return; }
     EmptyClipboard();
     if(!SetClipboardData(CF_UNICODETEXT, Mem)) { GlobalFree(Mem); }
+    CloseClipboard();
+}
+
+// Puts the selection on the clipboard: rows clipped to its pane, trailing blanks dropped, CRLF between.
+static void CopySelection(const clodw& C)
+{
+    s32 Sx = 0, Sy = 0, Ex = 0, Ey = 0;
+    SelectionRange(C, &Sx, &Sy, &Ex, &Ey);
+    std::string Text;
+    for(s32 Y = Max(Sy, 0); Y <= Ey && Y < C.GridH; ++Y)
+    {
+        s32 X0 = (Y == Sy) ? Sx : C.SelPane[0];
+        s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
+        std::string Line;
+        for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X)
+        {
+            const cell& K = C.Grid[(size_t)Y * C.GridW + X];
+            if(K.Flags & CELL_WIDE_CONT) { continue; }
+            AppendUtf8(Line, K.Codepoint >= 0x20 ? K.Codepoint : ' ');
+        }
+        while(!Line.empty() && Line.back() == ' ') { Line.pop_back(); }
+        Text += Line;
+        if(Y < Ey) { Text += "\r\n"; }
+    }
+    SetClipboardText(C.Window, Text);
+}
+
+// Sends the clipboard's text as a bracketed paste with CR line ends.
+static void PasteClipboard(clodw& C)
+{
+    if(!OpenClipboard(C.Window)) { return; }
+    HANDLE Data = GetClipboardData(CF_UNICODETEXT);
+    const wchar_t* Text = Data ? (const wchar_t*)GlobalLock(Data) : 0;
+    if(Text)
+    {
+        int Len = WideCharToMultiByte(CP_UTF8, 0, Text, -1, 0, 0, 0, 0);
+        std::string Utf8(Max(Len, 1), 0);
+        WideCharToMultiByte(CP_UTF8, 0, Text, -1, &Utf8[0], Len, 0, 0);
+        Utf8.resize(strlen(Utf8.c_str()));
+        std::string Paste;
+        for(size_t I = 0; I < Utf8.size(); ++I)
+        {
+            if(Utf8[I] == '\r' && I + 1 < Utf8.size() && Utf8[I + 1] == '\n') { continue; }
+            Paste += (Utf8[I] == '\n') ? '\r' : Utf8[I];
+        }
+        C.InBytes += "\x1b[200~" + Paste + "\x1b[201~";
+        GlobalUnlock(Data);
+    }
     CloseClipboard();
 }
 
@@ -566,6 +616,7 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             if(!ChooseFontW(&Cf)) { return 0; }
             C->FontFamily = Lf.lfFaceName;
             C->FontPt = Max(Cf.iPointSize, 10) / 10.0f;
+            C->FontPtSaved = C->FontPt;
             ApplyFont(*C);
 
             // Keep the file's other lines; replace the font ones.
@@ -620,7 +671,11 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         case WM_KILLFOCUS: C->InBytes += "\x1b[O"; C->Dirty = true; return 0;
 
         // --- mouse, reported the way the server asked for (MouseMode) ---
-        case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONDOWN:
+        // --- right-click pastes (never reported to the program; Claude's fullscreen has no use for it) ---
+        case WM_RBUTTONDOWN: PasteClipboard(*C); return 0;
+        case WM_RBUTTONUP: return 0;
+
+        case WM_LBUTTONDOWN: case WM_MBUTTONDOWN:
         {
             s32 Button = (Msg == WM_LBUTTONDOWN) ? 0 : (Msg == WM_MBUTTONDOWN ? 1 : 2);
             s32 Cx = GET_X_LPARAM(L) / Max(C->F.CellW, 1);
@@ -701,11 +756,17 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             MouseReport(*C, Button, L, false);
             return 0;
         }
-        case WM_LBUTTONUP: case WM_MBUTTONUP: case WM_RBUTTONUP:
+        case WM_LBUTTONUP: case WM_MBUTTONUP:
         {
-            s32 Button = (Msg == WM_LBUTTONUP) ? 0 : (Msg == WM_MBUTTONUP ? 1 : 2);
+            s32 Button = (Msg == WM_LBUTTONUP) ? 0 : 1;
             ReleaseCapture();
-            if(C->Selecting && Button == 0) { C->Selecting = false; if(!C->MouseHeld) { return 0; } }
+            if(C->Selecting && Button == 0)
+            {
+                // A finished selection goes straight to the clipboard and stays highlighted.
+                C->Selecting = false;
+                if(C->HasSelection && !C->CopyOnSelectOff) { CopySelection(*C); }
+                if(!C->MouseHeld) { return 0; }
+            }
             C->MouseHeld = 0;
             MouseReport(*C, Button, L, true);
             return 0;
@@ -740,6 +801,12 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             {
                 bool32 Up = C->WheelAccum > 0;
                 C->WheelAccum += Up ? -WHEEL_DELTA : WHEEL_DELTA;
+                if(GET_KEYSTATE_WPARAM(W) & MK_CONTROL) // Ctrl+wheel zooms, like Ctrl+= / Ctrl+-
+                {
+                    C->FontPt = fminf(fmaxf(C->FontPt + (Up ? 1.0f : -1.0f), 6.0f), 72.0f);
+                    ApplyFont(*C);
+                    continue;
+                }
                 C->MouseX = 0; // a wheel report is never a duplicate
                 MouseReport(*C, Up ? 64 : 65, MAKELPARAM(P.x, P.y), false);
             }
@@ -755,6 +822,7 @@ static int WindowMain(s32 JumpToTab)
     C.FontFamily = L"Cascadia Mono";
     C.FontPt = 12.0f;
     C.KeepActiveOff = (ReadSetting("keep_active") == "off");
+    C.CopyOnSelectOff = (ReadSetting("copy_on_select") == "off");
 
     // --- settings ---
     std::string Font = ReadSetting("font");
@@ -766,6 +834,7 @@ static int WindowMain(s32 JumpToTab)
     }
     float Size = (float)atof(ReadSetting("font_size").c_str());
     if(Size > 0) { C.FontPt = Size; }
+    C.FontPtSaved = C.FontPt;
 
     // --- window, renderer and font; sized to 120x36 cells at the monitor's DPI ---
     HINSTANCE Instance = GetModuleHandleW(0);
@@ -879,25 +948,7 @@ static int WindowMain(s32 JumpToTab)
                 {
                     if(C.HasSelection)
                     {
-                        s32 Sx = 0, Sy = 0, Ex = 0, Ey = 0;
-                        SelectionRange(C, &Sx, &Sy, &Ex, &Ey);
-                        std::string Text;
-                        for(s32 Y = Max(Sy, 0); Y <= Ey && Y < C.GridH; ++Y)
-                        {
-                            s32 X0 = (Y == Sy) ? Sx : C.SelPane[0];
-                            s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
-                            std::string Line;
-                            for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X)
-                            {
-                                const cell& K = C.Grid[(size_t)Y * C.GridW + X];
-                                if(K.Flags & CELL_WIDE_CONT) { continue; }
-                                AppendUtf8(Line, K.Codepoint >= 0x20 ? K.Codepoint : ' ');
-                            }
-                            while(!Line.empty() && Line.back() == ' ') { Line.pop_back(); }
-                            Text += Line;
-                            if(Y < Ey) { Text += "\r\n"; }
-                        }
-                        SetClipboardText(C.Window, Text);
+                        CopySelection(C);
                         C.HasSelection = false;
                         C.Dirty = true;
                     }
@@ -908,27 +959,18 @@ static int WindowMain(s32 JumpToTab)
                 // --- paste: Ctrl+Shift+V or Shift+Insert, as a bracketed paste with CR line ends ---
                 if((Msg.wParam == 'V' && Ctrl && Shift) || (Msg.wParam == VK_INSERT && Shift && !Ctrl))
                 {
-                    if(OpenClipboard(C.Window))
-                    {
-                        HANDLE Data = GetClipboardData(CF_UNICODETEXT);
-                        const wchar_t* Text = Data ? (const wchar_t*)GlobalLock(Data) : 0;
-                        if(Text)
-                        {
-                            int Len = WideCharToMultiByte(CP_UTF8, 0, Text, -1, 0, 0, 0, 0);
-                            std::string Utf8(Max(Len, 1), 0);
-                            WideCharToMultiByte(CP_UTF8, 0, Text, -1, &Utf8[0], Len, 0, 0);
-                            Utf8.resize(strlen(Utf8.c_str()));
-                            std::string Paste;
-                            for(size_t I = 0; I < Utf8.size(); ++I)
-                            {
-                                if(Utf8[I] == '\r' && I + 1 < Utf8.size() && Utf8[I + 1] == '\n') { continue; }
-                                Paste += (Utf8[I] == '\n') ? '\r' : Utf8[I];
-                            }
-                            C.InBytes += "\x1b[200~" + Paste + "\x1b[201~";
-                            GlobalUnlock(Data);
-                        }
-                        CloseClipboard();
-                    }
+                    PasteClipboard(C);
+                    continue;
+                }
+
+                // --- zoom: Ctrl+= / Ctrl+- change the font size for this window, Ctrl+0 goes back ---
+                bool32 ZoomIn = Msg.wParam == VK_OEM_PLUS || Msg.wParam == VK_ADD;
+                bool32 ZoomOut = Msg.wParam == VK_OEM_MINUS || Msg.wParam == VK_SUBTRACT;
+                bool32 ZoomReset = Msg.wParam == '0' || Msg.wParam == VK_NUMPAD0;
+                if(Ctrl && !Alt && !Shift && (ZoomIn || ZoomOut || ZoomReset))
+                {
+                    C.FontPt = ZoomReset ? C.FontPtSaved : fminf(fmaxf(C.FontPt + (ZoomIn ? 1.0f : -1.0f), 6.0f), 72.0f);
+                    ApplyFont(C);
                     continue;
                 }
                 // --- clod commands without the prefix (only a window can tell Ctrl+Shift+T from Ctrl+T):
