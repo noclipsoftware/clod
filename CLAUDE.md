@@ -58,6 +58,10 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   - Cursor shape: the emulator keeps DECSCUSR (`vt_terminal::CursorShape`); the frame carries it
     (console clients get it re-sent, clodw draws block/underline/bar and blinks the odd shapes).
   - With `clodw.exe` next to `clod.exe`, the tray (`LaunchClientWindow`) opens clodw.
+  - Opacity (`opacity = 85` in settings.txt, or the window menu's Opacity submenu, which saves it;
+    20-100, missing = 100): the swap chain goes through DirectComposition with premultiplied alpha
+    (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background
+    (`GPU_SEE_THROUGH`) and the margin are see-through; text, colored backgrounds and the bars stay solid.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in
@@ -102,7 +106,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 - clodw's keep-active (`keep_active = off` disables): while clodw is the foreground window, it
   nudges the mouse a pixel and back whenever Windows' idle time passes 2 minutes, so Slack and
   the like don't go "away". Its light is the bar's last cell (green = keeping active), which the
-  server leaves blank.
+  server leaves blank; the shader draws it round (`GPU_DOT`), since fonts' ● gets squeezed to fit a cell.
 
 ## Tabs: cmd hosting claude
 

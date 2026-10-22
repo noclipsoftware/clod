@@ -1,7 +1,8 @@
 // clodw's GPU side: one Direct3D 11 pixel shader draws the whole window from a grid of cells, each
 // naming a tile in a glyph atlas texture plus its colors. Glyph tiles are drawn on demand with
 // Direct2D/DirectWrite (clodw_glyphs.cpp). Device and swap chain set up like the game renderer
-// (FLIP_DISCARD, 2 buffers, latency 1); BGRA support is added for Direct2D.
+// (FLIP_DISCARD, 2 buffers, latency 1); BGRA support is added for Direct2D, and the swap chain goes
+// through DirectComposition so the background can be see-through (settings "opacity").
 
 #define ReleaseCom(P) do { if(P) { (P)->Release(); (P) = 0; } } while(0)
 
@@ -21,6 +22,8 @@ enum
     GPU_COLOR     = 1 << 2, // the tile holds its own colors (emoji): draw them instead of tinting with Fg
     GPU_CURSOR_UNDER = 1 << 3, // underline cursor across this cell
     GPU_CURSOR_BAR   = 1 << 4, // bar cursor at this cell's left edge
+    GPU_SEE_THROUGH  = 1 << 5, // the background is the terminal's default: drawn at the window's opacity
+    GPU_DOT          = 1 << 6, // a round dot in Fg, drawn by the shader (no font draws it round in every cell shape)
 };
 
 // Matches cbuffer Consts in the shader.
@@ -35,7 +38,8 @@ struct alignas(16) gpu_consts
     u32 StrikeY;
     u32 LineH;
     u32 CursorThick; // underline / bar cursor thickness in pixels
-    u32 Pad[3];
+    u32 Opacity;     // 0..255, for GPU_SEE_THROUGH backgrounds and the margin
+    u32 Pad[2];
 };
 
 #define ATLAS_SIZE 2048
@@ -47,6 +51,9 @@ struct renderer
     ID3D11Device* Device;
     ID3D11DeviceContext* Context;
     IDXGISwapChain1* SwapChain;
+    IDCompositionDevice* Comp; // the swap chain is shown through DirectComposition, so it can be see-through
+    IDCompositionTarget* CompTarget;
+    IDCompositionVisual* CompVisual;
     ID3D11RenderTargetView* Target;
     s32 BackW;
     s32 BackH;
@@ -74,7 +81,7 @@ cbuffer Consts : register(b0)
 {
     uint CellW; uint CellH; uint GridW; uint GridH;
     uint MarginColor; uint UnderlineY; uint StrikeY; uint LineH;
-    uint CursorThick; uint Pad0; uint Pad1; uint Pad2;
+    uint CursorThick; uint Opacity; uint Pad1; uint Pad2;
 };
 StructuredBuffer<Cell> Cells : register(t0);
 Texture2D<float4> Atlas : register(t1);
@@ -92,7 +99,8 @@ float4 PsMain(float4 Pos : SV_Position) : SV_Target
 {
     uint2 P = uint2(Pos.xy);
     uint2 C = uint2(P.x / CellW, P.y / CellH);
-    if(C.x >= GridW || C.y >= GridH) { return float4(Unpack(MarginColor), 1); }
+    float See = Opacity / 255.0;
+    if(C.x >= GridW || C.y >= GridH) { return float4(Unpack(MarginColor) * See, See); }
     uint2 In = P - C * uint2(CellW, CellH);
     Cell K = Cells[C.y * GridW + C.x];
     uint2 Tile = uint2(K.Tile & 0xFFFF, K.Tile >> 16);
@@ -100,13 +108,22 @@ float4 PsMain(float4 Pos : SV_Position) : SV_Target
     float3 Fg = Unpack(K.Fg);
     float3 Bg = Unpack(K.Bg);
     float3 Ink = (K.Flags & 4) ? T.rgb : Fg * T.a;
-    float3 Out = Ink + Bg * (1 - T.a);
+    float BgA = (K.Flags & 32) ? See : 1;
+    float3 Out = Ink + Bg * BgA * (1 - T.a); // premultiplied, like the swap chain
+    float OutA = T.a + BgA * (1 - T.a);
+    if(K.Flags & 64)
+    {
+        float2 D = float2(In) + 0.5 - float2(CellW, CellH) * 0.5;
+        float Cov = saturate(min(CellW, CellH) * 0.32 - length(D) + 0.5); // antialiased edge
+        Out = Fg * Cov + Bg * BgA * (1 - Cov);
+        OutA = Cov + BgA * (1 - Cov);
+    }
     bool Under = (K.Flags & 1) && In.y >= UnderlineY && In.y < UnderlineY + LineH;
     bool Strike = (K.Flags & 2) && In.y >= StrikeY && In.y < StrikeY + LineH;
     bool CursorUnder = (K.Flags & 8) && In.y + CursorThick >= CellH;
     bool CursorBar = (K.Flags & 16) && In.x < CursorThick;
-    if(Under || Strike || CursorUnder || CursorBar) { Out = Fg; }
-    return float4(Out, 1);
+    if(Under || Strike || CursorUnder || CursorBar) { Out = Fg; OutA = 1; }
+    return float4(Out, OutA);
 }
 )";
 
@@ -139,19 +156,31 @@ static bool32 RendererCreate(renderer& R, HWND Window)
     DxgiDevice->SetMaximumFrameLatency(1);
     DxgiDevice->GetAdapter(&Adapter);
     Adapter->GetParent(__uuidof(IDXGIFactory2), (void**)&Factory);
+    // A composition swap chain with premultiplied alpha, so default backgrounds can let the desktop
+    // show through (the window has WS_EX_NOREDIRECTIONBITMAP). Its size is explicit, unlike an HWND's.
+    RECT Client = {};
+    GetClientRect(Window, &Client);
     DXGI_SWAP_CHAIN_DESC1 Desc = {};
+    Desc.Width = (UINT)Max(1, (s32)(Client.right - Client.left));
+    Desc.Height = (UINT)Max(1, (s32)(Client.bottom - Client.top));
     Desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     Desc.SampleDesc.Count = 1;
     Desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     Desc.BufferCount = 2;
-    Desc.Scaling = DXGI_SCALING_NONE;
+    Desc.Scaling = DXGI_SCALING_STRETCH;
     Desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    Desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    Hr = Factory->CreateSwapChainForHwnd(R.Device, Window, &Desc, 0, 0, &R.SwapChain);
-    Factory->MakeWindowAssociation(Window, DXGI_MWA_NO_ALT_ENTER);
+    Desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    Hr = Factory->CreateSwapChainForComposition(R.Device, &Desc, 0, &R.SwapChain);
     ReleaseCom(Factory);
     ReleaseCom(Adapter);
-    if(FAILED(Hr)) { ReleaseCom(DxgiDevice); return RendererFail(Hr, "CreateSwapChainForHwnd"); }
+    if(FAILED(Hr)) { ReleaseCom(DxgiDevice); return RendererFail(Hr, "CreateSwapChainForComposition"); }
+    Hr = DCompositionCreateDevice(DxgiDevice, __uuidof(IDCompositionDevice), (void**)&R.Comp);
+    if(SUCCEEDED(Hr)) { Hr = R.Comp->CreateTargetForHwnd(Window, TRUE, &R.CompTarget); }
+    if(SUCCEEDED(Hr)) { Hr = R.Comp->CreateVisual(&R.CompVisual); }
+    if(SUCCEEDED(Hr)) { Hr = R.CompVisual->SetContent(R.SwapChain); }
+    if(SUCCEEDED(Hr)) { Hr = R.CompTarget->SetRoot(R.CompVisual); }
+    if(SUCCEEDED(Hr)) { Hr = R.Comp->Commit(); }
+    if(FAILED(Hr)) { ReleaseCom(DxgiDevice); return RendererFail(Hr, "DirectComposition"); }
 
     // --- shaders, compiled from the embedded source ---
     ID3DBlob* Code = 0;
@@ -239,6 +268,9 @@ static void RendererRelease(renderer& R)
     ReleaseCom(R.PixelShader);
     ReleaseCom(R.VertexShader);
     ReleaseCom(R.Target);
+    ReleaseCom(R.CompVisual);
+    ReleaseCom(R.CompTarget);
+    ReleaseCom(R.Comp);
     ReleaseCom(R.SwapChain);
     ReleaseCom(R.Context);
     ReleaseCom(R.Device);

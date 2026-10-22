@@ -56,6 +56,8 @@ struct clodw
     bool32 Quit;
     bool32 CopyOnSelectOff; // settings "copy_on_select = off": a finished selection isn't copied
     bool32 KeepActiveOff;  // settings "keep_active = off": don't hold off Windows' idle (Slack's away)
+    s32 Transparency;      // 100 - settings "opacity" (percent): 0 = opaque
+    HMENU OpacityMenu;     // the window menu's Opacity submenu
     bool32 Keeping;        // keeping the user active right now (the bar's light shows it)
     std::string ByeReason;
     std::vector<gpu_cell> Gpu;
@@ -90,6 +92,17 @@ static u32 ResolveColor(u32 C, u32 Default)
 
 #define DEFAULT_FONT_PT 12.0f
 #define IDM_FONT 0x0100 // window menu command (system menu ids keep the low 4 bits clear)
+#define IDM_OPACITY 0x0200 // + 16 * index into OpacitySteps
+static const s32 OpacitySteps[] = {100, 95, 90, 85, 80, 75, 70, 60, 50};
+
+// Ticks the Opacity menu's entry for the current opacity (none for a value set by hand in settings.txt).
+static void CheckOpacity(const clodw& C)
+{
+    for(u32 I = 0; I < ArrayCount(OpacitySteps); ++I)
+    {
+        CheckMenuItem(C.OpacityMenu, IDM_OPACITY + I * 16, MF_BYCOMMAND | (OpacitySteps[I] == 100 - C.Transparency ? MF_CHECKED : MF_UNCHECKED));
+    }
+}
 
 // Font size in pixels at the window's DPI; resets the glyph atlas.
 static void ApplyFont(clodw& C)
@@ -98,31 +111,15 @@ static void ApplyFont(clodw& C)
     C.Dirty = true;
 }
 
-// Writes the font lines of settings.txt (the Font... dialog, zoom), keeping the file's other lines.
+// Writes the font lines of settings.txt (the Font... dialog, zoom).
 static void SaveFontSettings(const std::wstring& Family, float Pt)
 {
-    std::string Kept;
-    FILE* File = 0;
-    _wfopen_s(&File, SettingsPath().c_str(), L"rb");
-    char Line[512];
-    while(File && fgets(Line, sizeof(Line), File))
-    {
-        std::string Key = Line;
-        Key = Key.substr(0, Key.find('='));
-        while(!Key.empty() && strchr(" \t\r\n", Key.back())) { Key.pop_back(); }
-        if(Key != "font" && Key != "font_size") { Kept += Line; }
-    }
-    if(File) { fclose(File); }
-    if(!Kept.empty() && Kept.back() != '\n') { Kept += "\r\n"; }
     char Face[LF_FACESIZE * 3] = {};
     WideCharToMultiByte(CP_UTF8, 0, Family.c_str(), -1, Face, sizeof(Face), 0, 0);
     char Size[32];
     snprintf(Size, sizeof(Size), "%g", Pt);
-    Kept += std::string("font = ") + Face + "\r\nfont_size = " + Size + "\r\n";
-    std::wstring Path = SettingsPath();
-    CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);
-    _wfopen_s(&File, Path.c_str(), L"wb");
-    if(File) { fwrite(Kept.data(), 1, Kept.size(), File); fclose(File); }
+    WriteSetting("font", Face);
+    WriteSetting("font_size", Size);
 }
 
 // The selection's start and end in reading order (anchor and moving end may be either way round).
@@ -435,6 +432,7 @@ static void Tick(clodw& C)
                     }
                 }
                 if(Color) { Flags |= GPU_COLOR; }
+                if(COLOR_TAG(K.Bg) == 0 && !(K.Attr & ATTR_INVERSE)) { Flags |= GPU_SEE_THROUGH; } // the terminal's own background
                 for(s32 Part = 0; Part < Span; ++Part)
                 {
                     C.Gpu[I + Part] = gpu_cell{Tile ? Tile + (u32)Part : 0, Fg, Bg, Flags};
@@ -450,16 +448,10 @@ static void Tick(clodw& C)
     // this window keeps the user active, grey otherwise ---
     if(!C.KeepActiveOff && C.GridW > 0 && C.GridH > 0)
     {
-        u32 Dot = 0x25CF; // ●
-        u32 Tile = 0;
-        bool32 Color = false;
         size_t I = (size_t)C.GridH * C.GridW - 1;
-        bool32 Overflow = false;
-        if(GlyphLookup(C.G, C.F, C.R, &Dot, 1, 0, 1, &Tile, &Color, &Overflow))
-        {
-            C.Gpu[I].Tile = Tile;
-            C.Gpu[I].Fg = C.Keeping ? PackRgb(90, 210, 110) : PackRgb(100, 100, 100);
-        }
+        C.Gpu[I].Tile = 0;
+        C.Gpu[I].Flags |= GPU_DOT;
+        C.Gpu[I].Fg = C.Keeping ? PackRgb(90, 210, 110) : PackRgb(100, 100, 100);
     }
 
     // --- the selection: rows from start to end, each clipped to the selection's pane ---
@@ -471,7 +463,11 @@ static void Tick(clodw& C)
         {
             s32 X0 = (Y == Sy) ? Sx : C.SelPane[0];
             s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
-            for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X) { C.Gpu[(size_t)Y * C.GridW + X].Bg = PackRgb(38, 79, 120); }
+            for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X)
+            {
+                C.Gpu[(size_t)Y * C.GridW + X].Bg = PackRgb(38, 79, 120);
+                C.Gpu[(size_t)Y * C.GridW + X].Flags &= ~GPU_SEE_THROUGH;
+            }
         }
     }
 
@@ -491,6 +487,7 @@ static void Tick(clodw& C)
                 u32 T = C.Gpu[K].Fg;
                 C.Gpu[K].Fg = C.Gpu[K].Bg;
                 C.Gpu[K].Bg = T;
+                C.Gpu[K].Flags &= ~GPU_SEE_THROUGH;
             }
         }
     }
@@ -505,6 +502,7 @@ static void Tick(clodw& C)
     Consts.StrikeY = (u32)C.F.StrikeY;
     Consts.LineH = (u32)C.F.LineH;
     Consts.CursorThick = (u32)Max(2, C.F.CellW / 6);
+    Consts.Opacity = (u32)((100 - C.Transparency) * 255 / 100);
     bool32 Drawn = RendererDraw(C.R, C.Gpu, Consts);
     LatencyMark("client_present");
     if(!Drawn)
@@ -639,7 +637,18 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         // --- Font... in the window menu: any installed font; applied now and saved to settings.txt ---
         case WM_SYSCOMMAND:
         {
-            if((W & 0xFFF0) != IDM_FONT) { break; }
+            // Opacity > 85% etc.: the terminal's background lets the desktop through; saved to settings.txt.
+            u32 Cmd = (u32)(W & 0xFFF0);
+            if(Cmd >= IDM_OPACITY && Cmd < IDM_OPACITY + ArrayCount(OpacitySteps) * 16)
+            {
+                s32 Opacity = OpacitySteps[(Cmd - IDM_OPACITY) / 16];
+                C->Transparency = 100 - Opacity;
+                CheckOpacity(*C);
+                WriteSetting("opacity", std::to_string(Opacity));
+                C->Dirty = true;
+                return 0;
+            }
+            if(Cmd != IDM_FONT) { break; }
             LOGFONTW Lf = {};
             wcsncpy_s(Lf.lfFaceName, C->FontFamily.c_str(), _TRUNCATE);
             HDC Dc = GetDC(Window);
@@ -867,6 +876,8 @@ static int WindowMain(s32 JumpToTab)
     C.FontPt = DEFAULT_FONT_PT;
     C.KeepActiveOff = (ReadSetting("keep_active") == "off");
     C.CopyOnSelectOff = (ReadSetting("copy_on_select") == "off");
+    s32 Opacity = atoi(ReadSetting("opacity").c_str());
+    if(Opacity > 0) { C.Transparency = 100 - Clamp(Opacity, 20, 100); } // never so faint the window is lost
 
     // --- settings ---
     std::string Font = ReadSetting("font");
@@ -889,11 +900,20 @@ static int WindowMain(s32 JumpToTab)
     Class.lpszClassName = L"clodw";
     RegisterClassW(&Class);
     DWORD Style = WS_OVERLAPPEDWINDOW;
-    C.Window = CreateWindowExW(0, L"clodw", L"clod", Style, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, 0, 0, Instance, &C);
+    C.Window = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, L"clodw", L"clod", Style, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, 0, 0, Instance, &C);
     if(!C.Window || !RendererCreate(C.R, C.Window)) { return 1; }
     HMENU WindowMenu = GetSystemMenu(C.Window, FALSE);
     AppendMenuW(WindowMenu, MF_SEPARATOR, 0, 0);
     AppendMenuW(WindowMenu, MF_STRING, IDM_FONT, L"Font...");
+    C.OpacityMenu = CreatePopupMenu();
+    for(u32 I = 0; I < ArrayCount(OpacitySteps); ++I)
+    {
+        wchar_t Label[16] = {};
+        swprintf(Label, 16, L"%d%%", OpacitySteps[I]);
+        AppendMenuW(C.OpacityMenu, MF_STRING, IDM_OPACITY + I * 16, Label);
+    }
+    AppendMenuW(WindowMenu, MF_POPUP, (UINT_PTR)C.OpacityMenu, L"Opacity");
+    CheckOpacity(C);
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
 
