@@ -139,12 +139,14 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   Changing a default in `shell/` doesn't reach an existing `~\.clod`; to see it, edit `~\.clod`
   or delete the file plus `init.bat` to reseed. Keep `clink.autoupdate = off` in the default
   `clink_settings`: the binaries are the vendored copy.
-- The default shell (`shell/`): `init.bat` appends Git for Windows' `usr\bin` to PATH (found next
-  to the git on PATH, in the usual install folders, or via `HKLM\SOFTWARE\GitForWindows`; appended,
-  never prepended, so Windows' `find`/`sort` and MSVC's `link.exe` keep winning), adds
-  `~\.local\bin` when claude is there but not on PATH, prints a grey tip only for what's missing
-  (Git for Windows, Claude Code), sets `LS_COLORS` and loads `aliases.txt` (a doskey macro file;
-  `;=` lines are comments). `clink/prompt.lua` draws folder, git branch and `*` for tracked
+- The default shell (`shell/`): keep `init.bat` near empty, every line of batch (and each
+  `doskey.exe`) adds to every tab's start; setup lives in clink Lua, which runs in-process.
+  `clink/clod.lua` appends Git for Windows' `usr\bin` to PATH (found next to the git on PATH or in
+  the usual install folders; appended, never prepended, so Windows' `find`/`sort` and MSVC's
+  `link.exe` keep winning), adds `~\.local\bin` when claude is there but not on PATH, prints a grey
+  tip only for what's missing (Git for Windows, Claude Code), sets `LS_COLORS` and the `ls`/`ll`
+  aliases (`os.setalias`). It runs at the tab's first prompt, so a claude started with the tab
+  doesn't get these PATH changes. `clink/prompt.lua` draws folder, git branch and `*` for tracked
   changes, then `λ` (red after a failed command); git status runs in `clink.promptcoroutine`, so
   the prompt never waits on git (keep it that way: a synchronous `io.popen` stalls every prompt).
   `clink_settings` holds the input colors (16-color only, so they follow the palette).
