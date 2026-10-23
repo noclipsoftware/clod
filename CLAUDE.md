@@ -77,7 +77,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
     right-click pastes and is never reported to programs (Claude's fullscreen has no use for it).
   - Zoom: Ctrl+= / Ctrl+- / Ctrl+wheel change the font size and save it to settings.txt like
     Font... does; Ctrl+0 goes back to the 12 pt default. A new grid or new panes clear the selection.
-  - Turn finished (and OSC 9/777, bell): the tray balloon fires when the tab isn't on screen or
+  - Turn finished (and OSC 9/777, bell): the tray balloon (silent: `NIIF_NOSOUND`) fires when the tab isn't on screen or
     the client window isn't in the foreground; for clodw the server also sends BEL, which flashes
     its taskbar button while it's in the background.
   - Clink's `terminal.mouse_input` must stay `off` in the default `clink_settings`: its `auto`

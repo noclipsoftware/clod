@@ -86,7 +86,7 @@ static void TrayNotify(tray_state& Tray, const std::string& Title, const std::st
     if(!Tray.Window) { return; } // no tray (test instance)
     NOTIFYICONDATAW N = TrayIconData(Tray);
     N.uFlags = NIF_INFO;
-    N.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_RESPECT_QUIET_TIME;
+    N.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_RESPECT_QUIET_TIME | NIIF_NOSOUND; // the banner, without the notification sound
     N.hBalloonIcon = Tray.LargeIcon;
     wcsncpy_s(N.szInfoTitle, Utf8ToWide(Title).c_str(), _TRUNCATE);
     wcsncpy_s(N.szInfo, Utf8ToWide(Body).c_str(), _TRUNCATE);
