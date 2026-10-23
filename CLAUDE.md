@@ -142,9 +142,11 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   filter, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
   There is no armed-prefix state and no prefix + key chords.
 - The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
-  counts) is where a pane picks what it shows: "Running" lists every tab (number, name, what it's
-  doing, folder; `x` closes the selected one), then keys for new ones, then the Claude Code
-  sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
+  counts) is where a pane picks what it shows: the running tabs in sections like Claude's agents
+  view (`HomeRows`/`TabSection`): Needs input (claude rang or sent OSC 9/777, `tab::NeedsInput`,
+  cleared by typing into it or a new turn), Working (title spinner), Completed (idle claude),
+  Shells (no claude); each row has number, name, a notice or what a shell runs, folder (`x`
+  closes the selected one). Then keys for new ones, then the Claude Code sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
   shows it. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing

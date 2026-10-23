@@ -1045,6 +1045,7 @@ static int ServerMain()
                 u32 First = T->Term.Title.empty() ? 0 : DecodeUtf8(T->Term.Title.data(), T->Term.Title.size(), &TitleAt);
                 bool32 Busy = (First >= 0x25D0 && First <= 0x25D3); // ◐◑◒◓
                 if(T->TitleBusy && !Busy && First == 0x2733) { Why = "Claude finished"; } // ✳
+                if(Busy && !T->TitleBusy) { T->NeedsInput = false; } // a new turn: whatever it asked is settled
                 T->TitleBusy = Busy;
                 if(T->Term.Bell)
                 {
@@ -1071,6 +1072,9 @@ static int ServerMain()
             HWND ClientRoot = ClientWindow ? GetAncestor(ClientWindow, GA_ROOTOWNER) : 0;
             bool32 Unseen = !Attached || PaneShowing(App, T) < 0 || (ClientRoot && GetForegroundWindow() != ClientRoot);
             if(!Why.empty() && ClientCells && Why != "Bell" && Why != "Claude needs your attention") { ToClient += "\x07"; }
+            // Claude ringing or notifying (a permission prompt, a question) waits for the user: the home
+            // screen lists it under "Needs input" until something is typed into it or a turn starts.
+            if(!T->SessionId.empty() && !Why.empty() && Why != "Claude finished") { T->NeedsInput = true; }
             // Off screen it waits on the home screen and the top bar until some pane shows it.
             if(!Why.empty() && PaneShowing(App, T) < 0)
             {

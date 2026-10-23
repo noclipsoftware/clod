@@ -25,6 +25,7 @@ struct tab
     std::string Notice;     // why it wants a look ("finished", "needs you", ...), set while no pane showed it
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
+    bool32 NeedsInput;      // claude asked for the user (bell, OSC 9) and nothing has been typed into it since
     u64 NotifiedAtMs;       // last tray notification about this tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
     std::string HistorySaved; // what that file holds, to skip rewriting it unchanged
@@ -373,9 +374,57 @@ static tab* FindTabBySession(const app_state& App, const std::string& Id, s32* I
     return 0;
 }
 
-// --- home screen layout, relative to its pane: "Running" and a row per tab (at least one), the keys
-// for new ones, a blank row, then the Claude Code sessions: title, filter, column heads, the list ---
-static s32 HomeSessionsRow(const app_state& App) { return 1 + Max((s32)App.Tabs.size(), 1) + 2; }
+// --- home screen layout, relative to its pane: the running tabs in sections (a heading row, then a
+// row per tab; one "nothing running" row when there are none), the keys for new ones, a blank row,
+// then the Claude Code sessions: title, filter, column heads, the list ---
+enum home_section
+{
+    SECTION_NEEDS_INPUT = 0, // claude waiting on the user
+    SECTION_WORKING,         // claude mid-turn
+    SECTION_COMPLETED,       // claude done, waiting for the next prompt
+    SECTION_SHELLS,          // no claude running
+    SECTION_COUNT,
+};
+static const char* SectionNames[SECTION_COUNT] = {"Needs input", "Working", "Completed", "Shells"};
+
+static s32 TabSection(const tab& T)
+{
+    if(T.SessionId.empty()) { return SECTION_SHELLS; }
+    if(T.NeedsInput) { return SECTION_NEEDS_INPUT; }
+    return T.TitleBusy ? SECTION_WORKING : SECTION_COMPLETED;
+}
+
+// The running area's rows, top down: a tab's index into Tabs, or -1 - section for a heading. The
+// selection counts only the tab rows, in this order.
+static std::vector<s32> HomeRows(const app_state& App)
+{
+    std::vector<s32> Rows;
+    for(s32 Section = 0; Section < SECTION_COUNT; ++Section)
+    {
+        size_t Heading = Rows.size();
+        for(s32 I = 0; I < (s32)App.Tabs.size(); ++I)
+        {
+            if(TabSection(*App.Tabs[I]) != Section) { continue; }
+            if(Rows.size() == Heading) { Rows.push_back(-1 - Section); }
+            Rows.push_back(I);
+        }
+    }
+    return Rows;
+}
+
+// The running tab the home screen's selection is on, or null (it's on a session).
+static tab* HomeSelectedTab(const app_state& App)
+{
+    s32 Seen = 0;
+    for(s32 Row : HomeRows(App))
+    {
+        if(Row < 0) { continue; }
+        if(Seen++ == App.Selected) { return App.Tabs[Row]; }
+    }
+    return 0;
+}
+
+static s32 HomeSessionsRow(const app_state& App) { return Max((s32)HomeRows(App).size(), 1) + 2; }
 static s32 HomeListRow(const app_state& App) { return HomeSessionsRow(App) + 3; }
 static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH - HomeListRow(App)); }
 
@@ -397,7 +446,8 @@ static void HomeMoveSelection(app_state& App, s32 Delta)
 static void OpenSelected(app_state& App, std::vector<app_command>& Cmds)
 {
     s32 Running = (s32)App.Tabs.size();
-    if(App.Selected >= 0 && App.Selected < Running) { SwitchTab(App, App.Selected + 1); return; }
+    tab* Picked = HomeSelectedTab(App);
+    if(Picked) { SwitchTab(App, TabIndex(App, Picked)); return; }
     std::vector<s32> Filtered = FilterSessions(App);
     s32 Index = App.Selected - Running;
     if(Index < 0 || Index >= (s32)Filtered.size()) { return; }
@@ -632,6 +682,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             else if(!Tab->Exited)
             {
                 Tab->ScrollOffset = 0;
+                Tab->NeedsInput = false;
                 WriteToTab(Cmds, Tab, Tab->Term.BracketedPaste ? "\x1b[200~" + App.PasteBuf + "\x1b[201~" : App.PasteBuf);
             }
             App.PasteBuf.clear();
@@ -704,7 +755,12 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             if(Tab)
             {
                 App.CameFrom = Tab;
-                App.Selected = TabIndex(App, Tab) - 1;
+                App.Selected = 0; // its place among the tab rows
+                for(s32 Row : HomeRows(App))
+                {
+                    if(Row >= 0 && App.Tabs[Row] == Tab) { break; }
+                    if(Row >= 0) { App.Selected += 1; }
+                }
                 App.Filter.clear();
                 App.FilterEditing = false;
                 SwitchTab(App, 0);
@@ -776,7 +832,13 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 // --- home screen: a click selects a running tab or a session, a second click opens it ---
                 s32 Running = (s32)App.Tabs.size();
                 s32 Clicked = -1;
-                if(Y - 1 >= 1 && Y - 1 <= Running) { Clicked = Y - 2; }
+                std::vector<s32> Rows = HomeRows(App);
+                for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size(); ++Ri)
+                {
+                    if(Rows[Ri] < 0) { continue; }
+                    if(Ri == Y - 1) { Clicked = Pos; }
+                    Pos += 1;
+                }
                 s32 ListRow = HomeListRow(App);
                 if(Y - 1 >= ListRow && Y - 1 < ListRow + HomeListRows(App, R.H) && App.ListScroll + (Y - 1 - ListRow) < (s32)FilterSessions(App).size())
                 {
@@ -827,7 +889,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         if(!Tab)
         {
             s32 Running = (s32)App.Tabs.size();
-            tab* SelectedTab = (App.Selected >= 0 && App.Selected < Running) ? App.Tabs[App.Selected] : 0;
+            tab* SelectedTab = HomeSelectedTab(App);
             bool32 Typing = App.FilterEditing && K.Kind == KEY_CHAR && !(K.Mods & (KMOD_CTRL | KMOD_ALT));
             if(Typing)
             {
@@ -940,6 +1002,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             continue;
         }
         Tab->ScrollOffset = 0;
+        Tab->NeedsInput = false; // answered
         if(Tab->Term.AppCursorKeys && Raw.size() == 3 && Raw[0] == 0x1B && Raw[1] == '[' && strchr("ABCDHF", Raw[2])) { Raw[1] = 'O'; }
         WriteToTab(Cmds, Tab, Raw);
     }
@@ -1340,49 +1403,57 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             continue;
         }
 
-        // --- home screen: the running tabs, keys for new ones, then the Claude Code sessions ---
-        s32 Running = (s32)App.Tabs.size();
+        // --- home screen: the running tabs in sections, keys for new ones, then the Claude Code sessions ---
+        std::vector<s32> Rows = HomeRows(App);
         s32 Bottom = Top + PR.H; // rows below belong to other panes or the command bar
         cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
-        s32 RX = PutText(F, Left + 1, Top, "Running", Style(0, 0, ATTR_BOLD), Right);
-        PutText(F, RX + 2, Top, std::to_string(Running), Dim, Right);
-        if(Running == 0) { PutText(F, Left + 5, Top + 1, "Nothing running yet.", Dim, Right); }
+        if(Rows.empty()) { PutText(F, Left + 1, Top, "Nothing running yet.", Dim, Right); }
         s32 NameX = Left + 5;
         s32 NameW = Clamp(PW / 3, 12, 40);
         s32 StatusX = NameX + NameW + 2;
         s32 CwdX = StatusX + 16;
-        for(s32 I = 0; I < Running; ++I)
+        for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size() && Top + Ri < Bottom; ++Ri)
         {
-            const tab* T = App.Tabs[I];
-            s32 Y = Top + 1 + I;
-            if(Y >= Bottom) { break; }
-            bool32 Sel = Focused && App.Selected == I; // other panes' home screens show no selection
+            s32 Y = Top + Ri;
+            if(Rows[Ri] < 0)
+            {
+                // --- a section heading and how many it holds ---
+                s32 Section = -1 - Rows[Ri];
+                s32 Count = 0;
+                for(const tab* T : App.Tabs) { Count += (TabSection(*T) == Section); }
+                cell Head = Style(Section == SECTION_NEEDS_INPUT ? Ui(UI_ACCENT) : 0, 0, ATTR_BOLD);
+                s32 HX = PutText(F, Left + 1, Y, SectionNames[Section], Head, Right);
+                PutText(F, HX + 2, Y, std::to_string(Count), Dim, Right);
+                continue;
+            }
+            const tab* T = App.Tabs[Rows[Ri]];
+            bool32 Sel = Focused && App.Selected == Pos++; // other panes' home screens show no selection
             cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);
             if(Sel) { PutText(F, Left + 1, Y, "\xE2\x80\xBA", Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD), Right); } // ›
-            // The number (prefix + digit shows it here) is in the accent while some pane shows the tab.
-            std::string Num = std::to_string(I + 1);
+            // The number (1-9 / Alt+digit shows it) is in the accent while some pane shows the tab.
+            std::string Num = std::to_string(Rows[Ri] + 1);
             bool32 OnScreen = PaneShowing(App, T) >= 0;
             PutText(F, Left + 4 - TextWidth(Num), Y, Num, OnScreen ? Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD) : RowDim, Right);
             PutText(F, NameX, Y, TruncateText(TabName(*T), NameW), Sel ? Style(0, Row.Bg, ATTR_BOLD) : Row, Right);
 
-            // --- what it's doing: a notice outranks the rest ---
-            std::string Status = "at prompt";
+            // --- beyond its section: a notice (finished while unseen, ...), else what a shell runs ---
+            std::string Status;
             cell StatusStyle = RowDim;
             bool32 Shell = T->SessionId.empty();
             if(T->Exited) { Status = "exited"; }
             else if(!T->Notice.empty()) { Status = "\xE2\x97\x8F " + T->Notice; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD); } // ●
-            else if(!Shell) { Status = T->TitleBusy ? "working" : "idle"; if(T->TitleBusy) { StatusStyle = Style(Ui(UI_NOTE), Row.Bg, 0); } }
-            else if(!RunningCommand(T->Term.Title).empty()) { Status = "running"; StatusStyle = Style(Ui(UI_NOTE), Row.Bg, 0); }
-            else if(T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
+            else if(Shell && !RunningCommand(T->Term.Title).empty()) { Status = "running"; StatusStyle = Style(Ui(UI_NOTE), Row.Bg, 0); }
+            else if(Shell && T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
+            else if(Shell) { Status = "at prompt"; }
             PutText(F, StatusX, Y, TruncateText(Status, 15), StatusStyle, Right);
             PutText(F, CwdX, Y, TruncateText(T->Cwd, Right - CwdX - 1), RowDim, Right);
         }
         {
             static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
             s32 KX = Left + 5;
-            s32 KY = Top + 1 + Max(Running, 1);
+            s32 KY = Top + Max((s32)Rows.size(), 1);
             for(u32 I = 0; I + 1 < ArrayCount(NewKeys) && KY < Bottom; I += 2)
             {
                 if(KX + TextWidth(NewKeys[I]) + 1 + TextWidth(NewKeys[I + 1]) > Right) { break; }
@@ -1423,19 +1494,19 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         PutText(F, ProjX, ST + 2, "PROJECT", Dim, Right);
         PutText(F, TitleX, ST + 2, "TITLE", Dim, Right);
 
-        s32 Rows = HomeListRows(App, PR.H);
+        s32 ListRows = HomeListRows(App, PR.H);
         s32 ListY = Top + HomeListRow(App);
-        s32 Scroll = Clamp(App.ListScroll, 0, Max(0, (s32)Filtered.size() - Rows));
+        s32 Scroll = Clamp(App.ListScroll, 0, Max(0, (s32)Filtered.size() - ListRows));
         if(Filtered.empty())
         {
             PutText(F, Left + 4, ListY, App.Sessions.empty() ? "No sessions found. Press n to start one." : "No matches.", Dim, Right);
         }
-        for(s32 R = 0; R < Rows && Scroll + R < (s32)Filtered.size() && ListY + R < Top + PR.H; ++R)
+        for(s32 R = 0; R < ListRows && Scroll + R < (s32)Filtered.size() && ListY + R < Top + PR.H; ++R)
         {
             s32 Index = Scroll + R;
             const session_info& S = App.Sessions[Filtered[Index]];
             s32 Y = ListY + R;
-            bool32 Sel = Focused && Running + Index == App.Selected;
+            bool32 Sel = Focused && (s32)App.Tabs.size() + Index == App.Selected;
             cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);
