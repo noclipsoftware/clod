@@ -258,7 +258,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - A shell tab is named for what it runs: cmd titles itself `<path>\cmd.exe - <command>` for
   external programs (`RunningCommand` tidies it and ignores clod's own startup steps), and the
   tab shows its current folder at the prompt (back to it as soon as the program exits). A shell
-  tab at its prompt is named `❯ <folder>` (like claude's own `✳`); running a program it shows
+  tab at its prompt is named `❯ <full path>` (like claude's own `✳`); running a program it shows
   just that program's name or title, no `❯`. Never the word "cmd".
 - The server finds claude by session file, not by how it was started: about once a second it walks
   each tab's process tree and reads `<ClaudeConfigDir>\sessions\<pid>.json` (`sessionId`, `cwd`;
