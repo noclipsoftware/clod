@@ -119,7 +119,7 @@ struct app_state
     s32 Selected; // home screen: 0..Tabs-1 = a running tab, then the filtered sessions
     s32 ListScroll;
 
-    u32 PrefixKey;      // the control byte that starts a clod command (settings "prefix"; server default Ctrl+\)
+    u32 PrefixKey;      // the key that goes home / back (settings "prefix"; default Alt+\): a control byte, or PREFIX_ALT | a character
     u64 CycleShownUntil; // the tab switcher box shows until then (ms; Ctrl+Tab, Ctrl+PgUp/PgDn); 0 = not shown
     tab* CameFrom;      // the tab the focused pane showed before the prefix brought it home: Esc goes back
     s32 Prompt;
@@ -165,14 +165,18 @@ struct app_command
     std::string Title;
 };
 
-// --- the prefix key: a control byte, named like "Ctrl+\" ---
+// --- the prefix key: a control byte ("Ctrl+]"), or PREFIX_ALT | a character ("Alt+\", the default) ---
 
-// The control byte for a setting like "ctrl+\" or "Ctrl+Space"; -1 when it isn't one clod can
+#define PREFIX_ALT 0x100u
+
+// The key for a setting like "alt+\", "ctrl+]" or "Ctrl+Space"; -1 when it isn't one clod can
 // use (Ctrl+H, I, M and [ arrive as Backspace, Tab, Enter and Esc).
 static s32 PrefixFromName(const std::string& Name)
 {
     std::string S;
     for(char C : Name) { if(C != ' ') { S += (C >= 'A' && C <= 'Z') ? (char)(C - 'A' + 'a') : C; } }
+    // Alt+<printable ASCII>: PREFIX_ALT | the character (arrives as ESC + it).
+    if(S.compare(0, 4, "alt+") == 0 && S.size() == 5 && S[4] > ' ' && S[4] < 0x7F) { return (s32)(PREFIX_ALT | (u8)S[4]); }
     if(S.compare(0, 5, "ctrl+") != 0) { return -1; }
     S = S.substr(5);
     s32 Key = -1;
@@ -185,6 +189,7 @@ static s32 PrefixFromName(const std::string& Name)
 
 static std::string PrefixName(u32 Key)
 {
+    if(Key & PREFIX_ALT) { return std::string("Alt+") + (char)(Key & 0xFF); }
     if(Key == 0) { return "Ctrl+Space"; }
     if(Key <= 26) { return std::string("Ctrl+") + (char)('A' + Key - 1); }
     static const char* Punct[] = {"Ctrl+\\", "Ctrl+]", "Ctrl+^", "Ctrl+_"};
@@ -844,7 +849,9 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         // Enter, Esc or the prefix again go straight back; on the home screen it goes back. clodw's
         // shortcuts send KEY_GO_HOME instead, which only ever goes home.
         bool32 GoHome = (K.Kind == KEY_GO_HOME);
-        if(GoHome || (K.Kind == KEY_CHAR && K.Codepoint == App.PrefixKey && K.Mods == KMOD_CTRL))
+        bool32 Prefix = (App.PrefixKey & PREFIX_ALT) ? (K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == (App.PrefixKey & 0xFF))
+                                                     : (K.Kind == KEY_CHAR && K.Mods == KMOD_CTRL && K.Codepoint == App.PrefixKey);
+        if(GoHome || Prefix)
         {
             if(Tab)
             {
