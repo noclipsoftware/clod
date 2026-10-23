@@ -483,6 +483,20 @@ static std::string TabsFileContents(const app_state& App)
     for(s32 P = 0; P < MAX_PANES; ++P) { Out += "\t" + std::to_string(TabIndex(App, App.PaneTab[P])); }
     Out += "\n";
     for(const monitor_layout& M : App.MonitorLayouts) { Out += "monitor\t" + std::to_string(M.Layout) + "\t" + M.Monitor + "\n"; }
+    // Pages, when there's more than one: which is current, then each one's layout, focus and panes
+    // (the current page from the live state; its entry in Pages is only refreshed when leaving it).
+    if(App.Pages.size() > 1)
+    {
+        Out += "pages\t" + std::to_string(App.Page) + "\n";
+        for(s32 G = 0; G < (s32)App.Pages.size(); ++G)
+        {
+            bool32 Current = (G == App.Page);
+            const page& Pg = App.Pages[G];
+            Out += "page\t" + std::to_string(Current ? App.Layout : Pg.Layout) + "\t" + std::to_string(Current ? App.Focus : Pg.Focus);
+            for(s32 P = 0; P < MAX_PANES; ++P) { Out += "\t" + std::to_string(TabIndex(App, Current ? App.PaneTab[P] : Pg.PaneTab[P])); }
+            Out += "\n";
+        }
+    }
     for(const tab* T : App.Tabs)
     {
         std::string Fields[4] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title};
@@ -651,7 +665,9 @@ static int ServerMain()
             for(HANDLE Proc : Still) { CloseHandle(Proc); }
         }
         s32 SavedActive = 0;
+        s32 SavedPage = 0;
         std::vector<std::string> SavedLayout;
+        std::vector<std::vector<std::string>> SavedPages;
         size_t At = 0;
         while(At < Saved.size())
         {
@@ -661,6 +677,8 @@ static int ServerMain()
             At = End + 1;
             if(F.size() >= 2 && F[0] == "active") { SavedActive = atoi(F[1].c_str()); }
             if(F.size() >= 3 + MAX_PANES && F[0] == "layout") { SavedLayout = F; }
+            if(F.size() >= 2 && F[0] == "pages") { SavedPage = atoi(F[1].c_str()); }
+            if(F.size() >= 3 + MAX_PANES && F[0] == "page") { SavedPages.push_back(F); }
             if(F.size() >= 3 && F[0] == "monitor") { App.MonitorLayouts.push_back(monitor_layout{F[2], Clamp(atoi(F[1].c_str()), 0, LAYOUT_MAIN)}); }
             // A claude tab resumes its session. A shell can't be resumed; it comes back as a fresh
             // one in the same folder, as does a claude that never got a prompt (no session file).
@@ -685,6 +703,26 @@ static int ServerMain()
         else
         {
             SwitchTab(App, Clamp(SavedActive, 0, (s32)App.Tabs.size()));
+        }
+        // --- the saved pages: each pane's tab when it came back and no earlier pane took it ---
+        if(SavedPages.size() > 1)
+        {
+            std::vector<tab*> Taken;
+            for(const std::vector<std::string>& F : SavedPages)
+            {
+                page Pg = {};
+                Pg.Layout = Clamp(atoi(F[1].c_str()), 0, LAYOUT_MAIN);
+                Pg.Focus = Clamp(atoi(F[2].c_str()), 0, PaneCount(Pg.Layout) - 1);
+                for(s32 P = 0; P < PaneCount(Pg.Layout); ++P)
+                {
+                    s32 Index = atoi(F[3 + P].c_str());
+                    tab* T = (Index > 0 && Index <= (s32)App.Tabs.size()) ? App.Tabs[Index - 1] : 0;
+                    if(T && std::find(Taken.begin(), Taken.end(), T) == Taken.end()) { Pg.PaneTab[P] = T; Taken.push_back(T); }
+                }
+                App.Pages.push_back(Pg);
+            }
+            App.Page = Clamp(SavedPage, 0, (s32)App.Pages.size() - 1);
+            LoadPage(App, App.Pages[App.Page]);
         }
     }
     std::string SavedTabs = TabsFileContents(App);

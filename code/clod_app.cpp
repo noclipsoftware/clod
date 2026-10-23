@@ -87,6 +87,14 @@ struct monitor_layout
     s32 Layout;
 };
 
+// A page: a layout and what its panes show, switched as a whole (like tmux's windows).
+struct page
+{
+    s32 Layout;
+    s32 Focus;
+    tab* PaneTab[MAX_PANES];
+};
+
 struct app_state
 {
     s32 Width;
@@ -97,6 +105,10 @@ struct app_state
     s32 Layout;                // LAYOUT_*
     s32 Focus;                 // the pane that gets the keys
     tab* PaneTab[MAX_PANES];   // what each pane shows; null = the home screen
+    // The current page lives in Layout/Focus/PaneTab; Pages holds every page, the current one's entry
+    // refreshed when leaving it. Empty = just the one page. A tab is in at most one pane of all pages.
+    std::vector<page> Pages;
+    s32 Page;                  // the current page's index in Pages
     s32 DragPane;              // pane + 1 a mouse button went down in (the drag stays there); 0 = none
     std::string Monitor;       // the attached window's monitor, as the client reports it
     std::vector<monitor_layout> MonitorLayouts;
@@ -226,15 +238,26 @@ static s32 PaneShowing(const app_state& App, const tab* T)
     return -1;
 }
 
-// The first tab no pane shows, looking from tab position From (0-based) onward and wrapping; Skip
-// is never picked. Null when every tab is on screen.
+// The other page with a pane showing T, or -1.
+static s32 OtherPageShowing(const app_state& App, const tab* T)
+{
+    for(s32 G = 0; G < (s32)App.Pages.size(); ++G)
+    {
+        if(G == App.Page) { continue; }
+        for(s32 P = 0; P < PaneCount(App.Pages[G].Layout); ++P) { if(T && App.Pages[G].PaneTab[P] == T) { return G; } }
+    }
+    return -1;
+}
+
+// The first tab no pane of any page shows, looking from tab position From (0-based) onward and
+// wrapping; Skip is never picked. Null when every tab is on screen somewhere.
 static tab* UnshownTab(const app_state& App, s32 From, const tab* Skip)
 {
     s32 N = (s32)App.Tabs.size();
     for(s32 K = 0; K < N; ++K)
     {
         tab* T = App.Tabs[(From + K) % N];
-        if(T != Skip && PaneShowing(App, T) < 0) { return T; }
+        if(T != Skip && PaneShowing(App, T) < 0 && OtherPageShowing(App, T) < 0) { return T; }
     }
     return 0;
 }
@@ -247,11 +270,15 @@ static void FocusPane(app_state& App, s32 Pane)
 }
 
 // Shows tab Index (0 = home screen) in the focused pane. A tab another pane shows swaps places:
-// that pane gets what this one had.
+// that pane gets what this one had. A tab on another page moves here; its pane there goes home.
 static void SwitchTab(app_state& App, s32 Index)
 {
     if(Index < 0 || Index > (s32)App.Tabs.size()) { return; }
     tab* T = (Index > 0) ? App.Tabs[Index - 1] : 0;
+    for(page& G : App.Pages)
+    {
+        for(tab*& P : G.PaneTab) { if(T && P == T && &G != &App.Pages[App.Page]) { P = 0; } }
+    }
     s32 Shown = PaneShowing(App, T);
     if(Shown >= 0) { App.PaneTab[Shown] = App.PaneTab[App.Focus]; }
     App.PaneTab[App.Focus] = T;
@@ -259,8 +286,9 @@ static void SwitchTab(app_state& App, s32 Index)
     if(T) { T->Activity = false; T->Notice.clear(); }
 }
 
-// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes show and the home
-// screen (the prefix goes there): cycling never pulls a tab out of another pane or moves the focus.
+// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes (of any page) show
+// and the home screen (the prefix goes there): cycling never pulls a tab out of another pane or
+// moves the focus.
 static void CycleTab(app_state& App, s32 Step)
 {
     s32 Count = (s32)App.Tabs.size();
@@ -270,7 +298,7 @@ static void CycleTab(app_state& App, s32 Step)
     {
         s32 Index = ((From + Step * I) % Count + Count) % Count;
         s32 Shown = PaneShowing(App, App.Tabs[Index]);
-        if(Shown < 0 || Shown == App.Focus) { SwitchTab(App, Index + 1); return; }
+        if((Shown < 0 || Shown == App.Focus) && OtherPageShowing(App, App.Tabs[Index]) < 0) { SwitchTab(App, Index + 1); return; }
     }
 }
 
@@ -306,6 +334,63 @@ static void ForgetTab(app_state& App, const tab* T)
     {
         if(App.PaneTab[P] == T) { App.PaneTab[P] = (P < PaneCount(App.Layout)) ? UnshownTab(App, From, T) : 0; }
     }
+    for(page& G : App.Pages) { for(tab*& P : G.PaneTab) { if(P == T) { P = 0; } } } // other pages: home
+}
+
+// --- pages ---
+
+static s32 PageCount(const app_state& App) { return Max(1, (s32)App.Pages.size()); }
+
+// Makes G the current page's live state (Layout/Focus/PaneTab); what its panes show counts as seen.
+static void LoadPage(app_state& App, const page& G)
+{
+    App.Layout = G.Layout;
+    for(s32 P = 0; P < MAX_PANES; ++P) { App.PaneTab[P] = G.PaneTab[P]; }
+    for(s32 P = 0; P < PaneCount(App.Layout); ++P)
+    {
+        if(App.PaneTab[P]) { App.PaneTab[P]->Activity = false; App.PaneTab[P]->Notice.clear(); }
+    }
+    FocusPane(App, G.Focus);
+    App.CycleShownUntil = 0;
+}
+
+// Goes to page Index (wrapping), keeping the one it leaves as it was.
+static void GoToPage(app_state& App, s32 Index)
+{
+    if(App.Pages.size() < 2) { return; }
+    s32 Count = (s32)App.Pages.size();
+    Index = ((Index % Count) + Count) % Count;
+    page& Leaving = App.Pages[App.Page];
+    Leaving.Layout = App.Layout;
+    Leaving.Focus = App.Focus;
+    for(s32 P = 0; P < MAX_PANES; ++P) { Leaving.PaneTab[P] = App.PaneTab[P]; }
+    App.Page = Index;
+    LoadPage(App, App.Pages[Index]);
+}
+
+// A new page after the current one, in the same layout, every pane on the home screen; goes there.
+static void NewPage(app_state& App)
+{
+    if(App.Pages.empty())
+    {
+        page First = {};
+        App.Pages.push_back(First);
+        App.Page = 0;
+    }
+    page Fresh = {};
+    Fresh.Layout = App.Layout;
+    App.Pages.insert(App.Pages.begin() + App.Page + 1, Fresh);
+    GoToPage(App, App.Page + 1);
+}
+
+// Drops the current page (not the last one); its tabs keep running, unshown.
+static void ClosePage(app_state& App)
+{
+    if(App.Pages.size() < 2) { return; }
+    App.Pages.erase(App.Pages.begin() + App.Page);
+    App.Page = Min(App.Page, (s32)App.Pages.size() - 1);
+    LoadPage(App, App.Pages[App.Page]);
+    if(App.Pages.size() == 1) { App.Pages.clear(); App.Page = 0; }
 }
 
 static void WriteToTab(std::vector<app_command>& Cmds, tab* Tab, const std::string& Bytes)
@@ -519,6 +604,7 @@ enum key_kind
     KEY_PASTE_BEGIN,
     KEY_FOCUS,
     KEY_GO_HOME,      // CSI 7777 ~: clodw's shortcuts, "home screen in this pane" (never back out of it)
+    KEY_GO_PAGE,      // CSI 7778 ; N ~: clodw's Ctrl+Alt+N, "go to page N" (Codepoint = N)
     KEY_OTHER,
 };
 
@@ -592,6 +678,7 @@ static input_token NextToken(const std::string& S, size_t At)
                     case 6: K.Kind = KEY_PGDN; break;
                     case 200: K.Kind = KEY_PASTE_BEGIN; break;
                     case 7777: K.Kind = KEY_GO_HOME; break;
+                    case 7778: K.Kind = KEY_GO_PAGE; K.Codepoint = (u32)P[1]; K.Mods = 0; break;
                 }
             }
             else if(Final == 'A') { K.Kind = KEY_UP; }
@@ -800,6 +887,22 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             FocusPane(App, K.Kind == KEY_DOWN ? 0 : 1);
             continue;
         }
+        // Pages: Ctrl+Alt+PgUp/PgDn step through them, clodw's Ctrl+Alt+1-9 jump.
+        if((K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && K.Mods == (KMOD_CTRL | KMOD_ALT))
+        {
+            if(App.Pages.size() < 2)
+            {
+                App.Status = "One page so far: P on the home screen makes another";
+                App.StatusUntil = NowMs + 3000;
+            }
+            GoToPage(App, App.Page + (K.Kind == KEY_PGDN ? 1 : -1));
+            continue;
+        }
+        if(K.Kind == KEY_GO_PAGE)
+        {
+            if(K.Codepoint >= 1 && (s32)K.Codepoint <= PageCount(App)) { GoToPage(App, (s32)K.Codepoint - 1); }
+            continue;
+        }
         if(Cycling)
         {
             CycleTab(App, K.Kind == KEY_PGDN ? 1 : -1);
@@ -824,7 +927,8 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                     for(const bar_hit& H : App.BarHits)
                     {
                         if(K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
-                        if(H.Pane < 0) { SwitchTab(App, 0); }
+                        if(H.Pane <= -2) { GoToPage(App, -2 - H.Pane); }
+                        else if(H.Pane < 0) { SwitchTab(App, 0); }
                         else { FocusPane(App, H.Pane); }
                     }
                 }
@@ -965,6 +1069,9 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 else if(C == 'n') { NewSession(Cmds, HomeCwd(App)); }
                 else if(C == 'o') { OpenFolderPrompt(App, HomeCwd(App)); }
                 else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = HomeCwd(App); Cmds.push_back(S); }
+                else if(C == 'P') { NewPage(App); }
+                else if(C == 'X') { ClosePage(App); }
+                else if(C == '[' || C == ']') { GoToPage(App, App.Page + (C == ']' ? 1 : -1)); }
                 else if(C == 'R' && SelectedTab) { app_command Re = {}; Re.Kind = CMD_RESTART; Re.Tab = SelectedTab; Cmds.push_back(Re); }
                 else if(C == 'm')
                 {
@@ -1211,6 +1318,18 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             }
             bar_hit Hit = {RX, X, -1};
             Hits.push_back(Hit);
+            // --- the pages, left of the counts when there's more than one: each a number, the
+            // current one in the accent; a click goes there ---
+            s32 PX = RX - 2;
+            for(s32 G = PageCount(App) - 1; G >= 0 && App.Pages.size() > 1; --G)
+            {
+                std::string Label = " " + std::to_string(G + 1) + " ";
+                PX -= TextWidth(Label);
+                if(PX < NamesEnd + 2) { break; }
+                PutText(F, PX, 0, Label, G == App.Page ? BarActive : BarShown, W);
+                bar_hit PageHit = {PX, PX + TextWidth(Label), -2 - G};
+                Hits.push_back(PageHit);
+            }
         }
     }
 
@@ -1476,7 +1595,10 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else if(Shell && T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
             else if(Shell) { Status = "at prompt"; }
             PutText(F, StatusX, Y, TruncateText(Status, 15), StatusStyle, Right);
-            PutText(F, CwdX, Y, TruncateText(T->Cwd, Right - CwdX - 1), RowDim, Right);
+            // On another page: says which, before the folder (Enter moves the tab here).
+            s32 OnPage = OtherPageShowing(App, T);
+            std::string Where = (OnPage >= 0 ? "page " + std::to_string(OnPage + 1) + " \xC2\xB7 " : std::string()) + T->Cwd; // ·
+            PutText(F, CwdX, Y, TruncateText(Where, Right - CwdX - 1), RowDim, Right);
         }
         {
             static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
@@ -1487,6 +1609,27 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 if(KX + TextWidth(NewKeys[I]) + 1 + TextWidth(NewKeys[I + 1]) > Right) { break; }
                 KX = PutText(F, KX, KY, NewKeys[I], KeyText, Right);
                 KX = PutText(F, KX, KY, std::string(" ") + NewKeys[I + 1], Dim, Right) + 3;
+            }
+        }
+        {
+            // --- the pages, on the row under those keys: numbers (the current one in the accent),
+            // then their keys ---
+            s32 GY = Top + Max((s32)Rows.size(), 1) + 1;
+            if(GY < Bottom)
+            {
+                s32 GX = PutText(F, Left + 1, GY, "Pages", Style(0, 0, ATTR_BOLD), Right) + 2;
+                for(s32 G = 0; G < PageCount(App); ++G)
+                {
+                    GX = PutText(F, GX, GY, " " + std::to_string(G + 1) + " ", G == App.Page ? BarActive : BarShown, Right) + 1;
+                }
+                static const char* PageKeys[] = {"P", "new page", "X", "close page", "[ ]", "switch", "Ctrl+Alt+PgUp/PgDn", "anywhere"};
+                GX += 2;
+                for(u32 I = 0; I + 1 < ArrayCount(PageKeys); I += 2)
+                {
+                    if(GX + TextWidth(PageKeys[I]) + 1 + TextWidth(PageKeys[I + 1]) > Right) { break; }
+                    GX = PutText(F, GX, GY, PageKeys[I], KeyText, Right);
+                    GX = PutText(F, GX, GY, std::string(" ") + PageKeys[I + 1], Dim, Right) + 3;
+                }
             }
         }
 

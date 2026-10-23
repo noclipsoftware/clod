@@ -1324,7 +1324,14 @@ static int WindowMain(s32 JumpToTab)
                 // Ctrl+Tab cycles tabs as Ctrl+PgDn/PgUp do; the rest go to the home screen (CSI 7777 ~,
                 // which never toggles back out of it) and press its key there ---
                 const char* Command = 0;
+                char PageSeq[16] = {};
                 if(Ctrl && !Alt && Msg.wParam == VK_TAB) { Command = Shift ? "\x1b[5;5~" : "\x1b[6;5~"; }
+                else if(Ctrl && Alt && !Shift && Msg.wParam >= '1' && Msg.wParam <= '9')
+                {
+                    // Ctrl+Alt+1-9: go to that page (CSI 7778 ; N ~, clod's own).
+                    snprintf(PageSeq, sizeof(PageSeq), "\x1b[7778;%d~", (int)(Msg.wParam - '0'));
+                    Command = PageSeq;
+                }
                 else if(Ctrl && Shift && !Alt)
                 {
                     switch(Msg.wParam)

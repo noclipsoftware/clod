@@ -180,6 +180,17 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing
   its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
+- Pages (like tmux's windows): each is a layout plus what its panes show and its focus. The
+  current page lives in `Layout`/`Focus`/`PaneTab`; `App.Pages` holds all of them (empty = one
+  page), the current entry refreshed when leaving it (`GoToPage`, `LoadPage`, `NewPage`,
+  `ClosePage`). A tab is in at most one pane of all pages: picking one that's on another page
+  moves it here (its pane there goes home); `UnshownTab` and cycling skip tabs on other pages, and
+  a tab on another page counts as unseen (notices). Ctrl+Alt+PgUp/PgDn step through pages
+  anywhere, clodw's Ctrl+Alt+1-9 jump (CSI 7778 ; N ~, `KEY_GO_PAGE`); on the home screen `P` new
+  page (same layout, panes home), `X` close page (its tabs keep running), `[`/`]` switch. Pages
+  show as numbers in the top bar (more than one; a click switches) and on the home screen's
+  Pages row; a tab on another page says "page N" in its row. tabs.txt keeps them (`pages`,
+  `page` lines).
 - Changing layout keeps the focused tab on screen and fills new panes with tabs nothing shows
   (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
 - Each visible tab's terminal and ConPTY are sized to its pane; off-screen tabs take the focused
