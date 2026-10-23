@@ -90,6 +90,25 @@ struct claude_find
     std::string ShellCwd;
 };
 
+// The home screen's Claude Code sessions, re-read on their own thread (hundreds of transcripts):
+// Known in (unchanged transcripts aren't read again), Sessions out, then Done and the loop's Wake.
+struct sessions_scan
+{
+    std::vector<session_info> Known;
+    std::vector<session_info> Sessions;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+static DWORD WINAPI SessionsScanThread(void* Param)
+{
+    sessions_scan* S = (sessions_scan*)Param;
+    S->Sessions = ScanSessions(S->Known);
+    InterlockedExchange(&S->Done, 1);
+    SetEvent(S->Wake);
+    return 0;
+}
+
 // A process scan handed to its own thread: CmdPids in, Finds out, then Done and the loop's Wake.
 struct claude_scan
 {
@@ -617,7 +636,7 @@ static int ServerMain()
         App.LaunchCwd = WideToUtf8(Home);
     }
     App.PrefixKey = LoadPrefixKey();
-    App.Sessions = ScanSessions();
+    App.Sessions = ScanSessions(std::vector<session_info>());
 
     SeedUserSetup(); // first run: the user's own copy of the default shell setup and settings
     InstallFonts();  // Iosevka Clod for every app, if it isn't installed yet
@@ -756,6 +775,8 @@ static int ServerMain()
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
     u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
     claude_scan* Scan = 0;      // a look under way on its own thread
+    u64 SessionsScanMs = 0;     // last re-read of the Claude Code sessions (SessionsScanThread)
+    sessions_scan* SessionsScan = 0;
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
     std::string OuterTitle;
     std::vector<u32> OuterWide;  // sorted codepoints the attached console draws 2 cells wide where CharWidth says 1
@@ -859,7 +880,7 @@ static int ServerMain()
                     App.Width = Max(A.Width, 1);
                     App.Height = Max(A.Height, 2);
                     if(A.JumpToTab) { SwitchTab(App, A.JumpToTab - 1); }
-                    App.Sessions = ScanSessions();
+                    App.Sessions = ScanSessions(App.Sessions);
                     ClientWindow = (HWND)(uintptr_t)A.ConsoleWindow;
                     ClientCells = (A.Flags & ATTACH_CELLS) != 0;
                     Attached = true;
@@ -1015,7 +1036,7 @@ static int ServerMain()
                 case CMD_VIEW_STEP: if(!C.Tab->ViewImage.empty()) { ViewImageAt(App, *C.Tab, C.Tab->ViewImage, C.Step, NowMs); } break;
                 case CMD_RESCAN:
                 {
-                    App.Sessions = ScanSessions();
+                    App.Sessions = ScanSessions(App.Sessions);
                     App.Selected = 0;
                     App.ListScroll = 0;
                 } break;
@@ -1175,6 +1196,43 @@ static int ServerMain()
             HANDLE Thread = CreateThread(0, 0, ClaudeScanThread, Scan, 0, 0);
             if(Thread) { CloseHandle(Thread); }
             else { delete Scan; Scan = 0; }
+        }
+        // --- the Claude Code sessions, re-read every 5 s while a window is attached, so the home
+        // screen is current when it opens; the selection stays on the same session ---
+        if(SessionsScan && SessionsScan->Done)
+        {
+            std::vector<session_info>& New = SessionsScan->Sessions;
+            bool32 Changed = New.size() != App.Sessions.size();
+            for(size_t I = 0; I < New.size() && !Changed; ++I)
+            {
+                Changed = New[I].Id != App.Sessions[I].Id || New[I].ModifiedTime != App.Sessions[I].ModifiedTime || New[I].Title != App.Sessions[I].Title;
+            }
+            if(Changed)
+            {
+                s32 Running = (s32)App.Tabs.size();
+                std::vector<s32> Filtered = FilterSessions(App);
+                s32 Index = App.Selected - Running;
+                std::string Kept = (Index >= 0 && Index < (s32)Filtered.size()) ? App.Sessions[Filtered[Index]].Id : std::string();
+                App.Sessions.swap(New);
+                if(!Kept.empty())
+                {
+                    Filtered = FilterSessions(App);
+                    for(s32 I = 0; I < (s32)Filtered.size(); ++I) { if(App.Sessions[Filtered[I]].Id == Kept) { App.Selected = Running + I; } }
+                }
+                Dirty = true;
+            }
+            delete SessionsScan;
+            SessionsScan = 0;
+        }
+        if(!SessionsScan && Attached && NowMs - SessionsScanMs >= 5000)
+        {
+            SessionsScanMs = NowMs;
+            SessionsScan = new sessions_scan();
+            SessionsScan->Known = App.Sessions;
+            SessionsScan->Wake = Wake;
+            HANDLE Thread = CreateThread(0, 0, SessionsScanThread, SessionsScan, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete SessionsScan; SessionsScan = 0; }
         }
         if(Attached && !ToClient.empty() && !IpcSendString(Client, MSG_OUTPUT, ToClient)) { IpcClose(Client); Attached = false; }
 

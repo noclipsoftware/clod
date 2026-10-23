@@ -217,8 +217,12 @@ static bool32 ReadSessionInfo(const std::wstring& Path, session_info& Out)
     return true;
 }
 
-static std::vector<session_info> ScanSessions()
+// Every Claude Code session with a prompt, newest first. A transcript unchanged since Known read it
+// (same path, write time and size) is taken from Known instead of being read again.
+static std::vector<session_info> ScanSessions(const std::vector<session_info>& Known)
 {
+    std::map<std::wstring, const session_info*> Cache;
+    for(const session_info& S : Known) { Cache[S.Path] = &S; }
     std::vector<session_info> Result;
     std::wstring Projects = ClaudeConfigDir() + L"\\projects";
 
@@ -235,8 +239,17 @@ static std::vector<session_info> ScanSessions()
         if(FileFind == INVALID_HANDLE_VALUE) { continue; }
         do
         {
+            std::wstring Path = ProjectDir + L"\\" + File.cFileName;
+            u64 Modified = ((u64)File.ftLastWriteTime.dwHighDateTime << 32) | File.ftLastWriteTime.dwLowDateTime;
+            u64 Size = ((u64)File.nFileSizeHigh << 32) | File.nFileSizeLow;
+            auto Hit = Cache.find(Path);
+            if(Hit != Cache.end() && Hit->second->ModifiedTime == Modified && Hit->second->Size == Size)
+            {
+                Result.push_back(*Hit->second);
+                continue;
+            }
             session_info Info = {};
-            if(ReadSessionInfo(ProjectDir + L"\\" + File.cFileName, Info))
+            if(ReadSessionInfo(Path, Info))
             {
                 // No prompt means nothing to resume (a session opened and quit before typing anything).
                 if(!Info.Title.empty()) { Result.push_back(Info); }

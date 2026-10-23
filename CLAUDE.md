@@ -180,7 +180,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   cleared by typing into it or a new turn), Working (title spinner), Completed (idle claude),
   Shells (no claude); each row has number, name, a notice or what a shell runs, folder (`x`
   closes the selected one). Then keys for new ones, then the Claude Code sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
-  shows it. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
+  shows it. The sessions list is re-read every 5 s while a window is attached
+  (`SessionsScanThread`; `ScanSessions` reuses `Known` entries for transcripts with the same
+  write time and size), keeping the selection on the same session. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing
   its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
@@ -291,8 +293,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   sends Ctrl+PgDn/PgUp, Ctrl+Shift+T/N/O/W/S/Space send CSI 7777 ~ (`KEY_GO_HOME`: home, never
   back) plus the home key (`t`, `n`, `o`, `x`).
 - The top bar shows **only** the name of what each top pane shows (above it; the focused one in
-  the accent; lower panes' names sit on their rule) and, on the right, how many tabs run and how
-  many want a look. No tab list: switching happens on the home screen. Commands, the close-tab
+  the accent; lower panes' names sit on their rule) and, on the right, the tabs by the home
+  screen's sections ("1 needs input · 2 working · 3 completed · 1 shell", else "7 running" when
+  that doesn't fit) and how many want a look. No tab list: switching happens on the home screen. Commands, the close-tab
   prompt, status messages and the scroll position all live in the bottom command bar.
 
 ## Character widths (subtle; read before touching CharWidth or RenderFrame)

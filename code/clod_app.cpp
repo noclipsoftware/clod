@@ -1328,13 +1328,36 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             Notices += 1;
             AllFinished = AllFinished && T->Notice == "finished";
         }
-        std::string Count = std::to_string(App.Tabs.size()) + " running";
+        // The tabs by the home screen's sections ("1 needs input · 2 working · 3 completed · 1 shell"),
+        // or just "7 running" when that doesn't fit; then the unseen notices.
+        static const char* Labels[SECTION_COUNT] = {"needs input", "working", "completed", "shell"};
+        s32 InSection[SECTION_COUNT] = {};
+        for(const tab* T : App.Tabs) { InSection[TabSection(*T)] += 1; }
         std::string Note = Notices ? "\xE2\x97\x8F " + std::to_string(Notices) + (AllFinished ? " finished" : " new") : std::string(); // ●
-        s32 Width = TextWidth(Count) + (Notices ? 3 + TextWidth(Note) : 0);
+        s32 NoteW = Notices ? 3 + TextWidth(Note) : 0;
+        s32 SectionsW = 0;
+        for(s32 Sec = 0; Sec < SECTION_COUNT; ++Sec)
+        {
+            if(!InSection[Sec]) { continue; }
+            std::string Part = std::to_string(InSection[Sec]) + " " + Labels[Sec] + (Sec == SECTION_SHELLS && InSection[Sec] > 1 ? "s" : "");
+            SectionsW += (SectionsW ? 3 : 0) + TextWidth(Part);
+        }
+        std::string Count = std::to_string(App.Tabs.size()) + " running";
+        bool32 BySection = SectionsW > 0 && W - SectionsW - NoteW - 1 >= NamesEnd + 2;
+        s32 Width = (BySection ? SectionsW : TextWidth(Count)) + NoteW;
         s32 RX = W - Width - 1;
         if(RX >= NamesEnd + 2)
         {
-            s32 X = PutText(F, RX, 0, Count, Bar, W);
+            s32 X = RX;
+            if(!BySection) { X = PutText(F, X, 0, Count, Bar, W); }
+            for(s32 Sec = 0; Sec < SECTION_COUNT && BySection; ++Sec)
+            {
+                if(!InSection[Sec]) { continue; }
+                if(X > RX) { X = PutText(F, X, 0, " \xC2\xB7 ", BarDim, W); } // ·
+                std::string Part = std::to_string(InSection[Sec]) + " " + Labels[Sec] + (Sec == SECTION_SHELLS && InSection[Sec] > 1 ? "s" : "");
+                cell PartStyle = (Sec == SECTION_NEEDS_INPUT) ? Style(Ui(UI_ACCENT), Ui(UI_BAR), ATTR_BOLD) : (Sec == SECTION_WORKING ? Style(Ui(UI_NOTE), Ui(UI_BAR), 0) : Bar);
+                X = PutText(F, X, 0, Part, PartStyle, W);
+            }
             if(Notices)
             {
                 X = PutText(F, X, 0, " \xC2\xB7 ", BarDim, W); // ·
