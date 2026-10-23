@@ -66,6 +66,8 @@ struct clodw
     u32 Theme;             // index into Themes (settings "theme"); 0 = Clod
     HMENU ThemeMenu;
     bool32 Keeping;       // keeping the user active right now (the bar's light shows it)
+    bool32 Fullscreen;    // F11: borderless over the whole monitor
+    WINDOWPLACEMENT Windowed; // where the window was before F11, to go back to (and to save on exit)
     std::string ByeReason;
     std::vector<gpu_cell> Gpu;
 };
@@ -636,11 +638,11 @@ static void Tick(clodw& C)
         GlyphCacheReset(C.G);
     }
 
-    // --- the keep-active light, in the bar's last cell (the server leaves it blank): green while
-    // this window keeps the user active, grey otherwise ---
-    if(!C.KeepActiveOff && C.GridW > 0 && C.GridH > 0)
+    // --- the keep-active light, in the command bar's second cell, before the clock (the server leaves
+    // it blank): green while this window keeps the user active, grey otherwise ---
+    if(!C.KeepActiveOff && C.GridW > 1 && C.GridH > 0)
     {
-        size_t I = (size_t)C.GridH * C.GridW - 1;
+        size_t I = (size_t)(C.GridH - 1) * C.GridW + 1;
         C.Gpu[I].Tile = 0;
         C.Gpu[I].Flags |= GPU_DOT;
         C.Gpu[I].Fg = C.Keeping ? PackRgb(90, 210, 110) : PackRgb(100, 100, 100);
@@ -1295,6 +1297,29 @@ static int WindowMain(s32 JumpToTab)
                     SaveFontSettings(C.FontFamily, C.FontPt);
                     continue;
                 }
+                // --- F11: fullscreen (borderless over the monitor) and back; programs never see F11 ---
+                if(Msg.wParam == VK_F11 && !Ctrl && !Alt && !Shift)
+                {
+                    LONG_PTR WinStyle = GetWindowLongPtrW(C.Window, GWL_STYLE);
+                    if(!C.Fullscreen)
+                    {
+                        C.Windowed = {sizeof(C.Windowed)};
+                        GetWindowPlacement(C.Window, &C.Windowed);
+                        MONITORINFO Mi = {sizeof(Mi)};
+                        GetMonitorInfoW(MonitorFromWindow(C.Window, MONITOR_DEFAULTTONEAREST), &Mi);
+                        SetWindowLongPtrW(C.Window, GWL_STYLE, (WinStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP | WS_SYSMENU);
+                        SetWindowPos(C.Window, HWND_TOP, Mi.rcMonitor.left, Mi.rcMonitor.top, Mi.rcMonitor.right - Mi.rcMonitor.left,
+                                     Mi.rcMonitor.bottom - Mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+                    }
+                    else
+                    {
+                        SetWindowLongPtrW(C.Window, GWL_STYLE, (WinStyle & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
+                        SetWindowPlacement(C.Window, &C.Windowed);
+                        SetWindowPos(C.Window, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                    }
+                    C.Fullscreen = !C.Fullscreen;
+                    continue;
+                }
                 // --- clod commands without the prefix (only a window can tell Ctrl+Shift+T from Ctrl+T):
                 // Ctrl+Tab cycles tabs as Ctrl+PgDn/PgUp do; the rest go to the home screen (CSI 7777 ~,
                 // which never toggles back out of it) and press its key there ---
@@ -1336,6 +1361,7 @@ static int WindowMain(s32 JumpToTab)
     WINDOWPLACEMENT Now = {sizeof(Now)};
     if(GetEnvironmentVariableW(L"CLOD_EPHEMERAL", 0, 0) == 0 && GetWindowPlacement(C.Window, &Now))
     {
+        if(C.Fullscreen) { Now = C.Windowed; } // fullscreen isn't kept: the next start opens where F11 left from
         bool32 Zoomed = Now.showCmd == SW_SHOWMAXIMIZED || (Now.showCmd == SW_SHOWMINIMIZED && (Now.flags & WPF_RESTORETOMAXIMIZED));
         std::wstring Path = WindowFilePath();
         CreateDirectoryW(Path.substr(0, Path.find_last_of(L'\\')).c_str(), 0);

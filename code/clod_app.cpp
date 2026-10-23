@@ -120,6 +120,7 @@ struct app_state
     std::string Status;
     u64 StatusUntil; // GetTickCount64 ms
     std::string LaunchCwd;
+    std::string Clock;  // local date and time for the command bar's left ("Thu Oct 23  2:05 PM"), set by the server
     std::vector<bar_hit> BarHits; // from the last composed frame
     bool32 Quit; // set by the server (tray Quit): stop, reopening the tabs with --resume next launch
 };
@@ -1231,7 +1232,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             const tab* Asked = App.PromptTab;
             std::string Question = Asked ? "Close " + std::to_string(TabIndex(App, Asked)) + " \"" + TruncateText(TabName(*Asked), 40) + "\" and end what it runs?" : std::string("Close?");
-            s32 BX = PutText(F, 1, Y, Question, KeyStyle, W) + 3;
+            s32 BX = PutText(F, 3, Y, Question, KeyStyle, W) + 3;
             BX = PutText(F, BX, Y, "y", KeyStyle, W);
             BX = PutText(F, BX, Y, " close", LabelStyle, W) + 2;
             BX = PutText(F, BX, Y, "any other key", KeyStyle, W);
@@ -1240,7 +1241,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         else if(Folder)
         {
             // Label, the path (its tail when too long) and the cursor; a status or the keys on the right.
-            s32 PX = PutText(F, 1, Y, "New session in ", LabelStyle, W);
+            s32 PX = PutText(F, 3, Y, "New session in ", LabelStyle, W);
             std::string Shown = App.PathInput;
             while(!Shown.empty() && TextWidth(Shown) > W - PX - 1)
             {
@@ -1289,10 +1290,13 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else if(Active) { Right = PrefixName(App.PrefixKey) + " home"; }
             else if(App.CameFrom) { Right = "Esc back"; }
             Right = TruncateText(Right, Max(W - 3, 0));
-            s32 RightX = W - TextWidth(Right) - 2; // the last two cells stay free: clodw draws its keep-active light there
+            s32 RightX = W - TextWidth(Right) - 1;
             s32 KeysEnd = Important ? Max(RightX - 2, 0) : W;
 
-            s32 BX = 1;
+            // The left starts with the date and time (cell 1 stays blank: clodw draws its keep-active
+            // light there), then the home screen's keys.
+            s32 BX = 3;
+            if(!App.Clock.empty() && BX + TextWidth(App.Clock) < RightX) { BX = PutText(F, BX, Y, App.Clock, LabelStyle, W) + 3; }
             // Whole entries only: the first one that doesn't fit ends the list.
             s32 ListEnd = (Right.empty() || Important) ? KeysEnd : RightX - 2;
             for(s32 I = 0; I + 1 < KeyCount; I += 2)

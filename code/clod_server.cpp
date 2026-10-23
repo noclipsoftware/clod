@@ -1251,6 +1251,17 @@ static int ServerMain()
         }
         // Status messages expire on their own.
         if(!App.Status.empty() && NowMs >= App.StatusUntil) { App.Status.clear(); Dirty = true; }
+        // The command bar's clock, in the user's own date and time formats; redrawn when the minute turns.
+        {
+            SYSTEMTIME Local = {};
+            GetLocalTime(&Local);
+            wchar_t Day[64] = {};
+            wchar_t Time[64] = {};
+            GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &Local, L"ddd MMM d", Day, ArrayCount(Day), 0);
+            GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &Local, 0, Time, ArrayCount(Time));
+            std::string Clock = WideToUtf8(std::wstring(Day) + L"  " + Time);
+            if(Clock != App.Clock) { App.Clock = Clock; Dirty = true; }
+        }
         if(App.CycleShownUntil && NowMs >= App.CycleShownUntil) { App.CycleShownUntil = 0; Dirty = true; } // the tab switcher box goes
     }
 

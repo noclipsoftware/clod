@@ -91,6 +91,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   - Cursor shape: the emulator keeps DECSCUSR (`vt_terminal::CursorShape`); the frame carries it
     (console clients get it re-sent, clodw draws block/underline/bar and blinks the odd shapes).
   - With `clodw.exe` next to `clod.exe`, the tray (`LaunchClientWindow`) opens clodw.
+  - F11: fullscreen (borderless `WS_POPUP` over the monitor) and back; programs never get F11. The
+    window place saved on exit is the one from before fullscreen.
+  - The command bar's left shows the local date and time (`App.Clock`, set by the server in the
+    user's own formats each minute), after the keep-active light's cell.
   - Opacity (`opacity = 85` in settings.txt, or the window menu's Opacity submenu, which saves it;
     20-100, missing = 100; new installs get 95 from the default `shell/settings.txt`): the swap chain goes through DirectComposition with premultiplied alpha
     (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background
@@ -186,7 +190,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   layout. The layout, panes and per-monitor layouts are saved in `tabs.txt`.
 - clodw's keep-active (`keep_active = off` disables): while clodw is the foreground window, it
   nudges the mouse a pixel and back whenever Windows' idle time passes 2 minutes, so Slack and
-  the like don't go "away". Its light is the bar's last cell (green = keeping active), which the
+  the like don't go "away". Its light is the command bar's second cell, before the clock (green = keeping active), which the
   server leaves blank; the shader draws it round (`GPU_DOT`), since fonts' ● gets squeezed to fit a cell.
 
 ## Tabs: cmd hosting claude
