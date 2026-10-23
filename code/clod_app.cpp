@@ -775,6 +775,19 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             FocusPane(App, (App.Focus + (K.Codepoint == 'q' ? 1 : Count - 1)) % Count);
             continue;
         }
+        // Alt+arrows pick a pane. 2x2 grid: up = top left, right = top right, left = bottom left,
+        // down = bottom right. Side by side: down = left, right = right. Other cases go to the program.
+        bool32 Arrow = K.Kind == KEY_UP || K.Kind == KEY_RIGHT || K.Kind == KEY_LEFT || K.Kind == KEY_DOWN;
+        if(Arrow && K.Mods == KMOD_ALT && App.Layout == LAYOUT_GRID)
+        {
+            FocusPane(App, K.Kind == KEY_UP ? 0 : (K.Kind == KEY_RIGHT ? 1 : (K.Kind == KEY_LEFT ? 2 : 3)));
+            continue;
+        }
+        if((K.Kind == KEY_DOWN || K.Kind == KEY_RIGHT) && K.Mods == KMOD_ALT && App.Layout == LAYOUT_SIDE)
+        {
+            FocusPane(App, K.Kind == KEY_DOWN ? 0 : 1);
+            continue;
+        }
         if(K.Kind == KEY_PGUP && K.Mods == KMOD_CTRL) { CycleTab(App, -1); continue; }
         if(K.Kind == KEY_PGDN && K.Mods == KMOD_CTRL) { CycleTab(App, 1); continue; }
         if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint >= '0' && K.Codepoint <= '9') { SwitchTab(App, (s32)(K.Codepoint - '0')); continue; }

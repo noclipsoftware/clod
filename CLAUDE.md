@@ -127,7 +127,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 
 - The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
   2x2 grid, main + 2; `z`/`v`/`g`/`b` on the home screen; Alt+Q / Alt+Shift+Q cycle the focus
-  anywhere, ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
+  anywhere, Alt+arrows pick a pane (grid: up = top left, right = top right, left = bottom left,
+  down = bottom right; side by side: down = left, right = right; otherwise they reach the program), ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
   or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
   Picking a tab another pane shows (Enter or its number on the home screen, Alt+number) swaps the
   two panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
