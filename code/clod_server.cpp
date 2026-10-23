@@ -863,6 +863,7 @@ static int ServerMain()
                     ClientWindow = (HWND)(uintptr_t)A.ConsoleWindow;
                     ClientCells = (A.Flags & ATTACH_CELLS) != 0;
                     Attached = true;
+                    App.WindowUnfocused = false; // a window that just attached has the focus
                     LaunchedWindowAtMs = 0;
                     // A fresh terminal: assume nothing about what it shows or which modes it has.
                     Prev = frame{};

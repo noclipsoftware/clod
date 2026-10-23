@@ -126,6 +126,7 @@ struct app_state
     tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
     std::string PathInput;
     bool32 MouseCaptureOff;
+    bool32 WindowUnfocused;   // the client window lost the keyboard focus (focus report ESC [ O): no accent edge
     bool32 WindowDrawsImages; // the attached client (clodw) draws images itself: panes leave them blank
     bool32 InPaste;
     std::string PasteBuf;
@@ -784,6 +785,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         if(K.Kind == KEY_PASTE_BEGIN) { App.InPaste = true; App.PasteBuf.clear(); continue; }
         if(K.Kind == KEY_FOCUS)
         {
+            App.WindowUnfocused = (Raw.back() == 'O'); // the window's own focus: the focused pane's edge shows it
             tab* Focused = ActiveTab(App);
             if(Focused && Focused->Pty && Focused->Term.FocusEvents) { WriteToTab(Cmds, Focused, Raw); }
             continue;
@@ -1738,7 +1740,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 if(OnV && !OnH && Y == SplitY && RightRule) { Cp = 0x251C; } // ├
                 bool32 Edge = (Sx == Focus.X - 1 || Sx == Focus.X + Focus.W) && Y >= Focus.Y - 1 && Y <= Focus.Y + Focus.H;
                 Edge = Edge || ((Y == Focus.Y - 1 || Y == Focus.Y + Focus.H) && Sx >= Focus.X - 1 && Sx <= Focus.X + Focus.W);
-                cell C = Style(Ui(Edge ? UI_ACCENT : UI_RULE), 0, 0);
+                cell C = Style(Ui(Edge && !App.WindowUnfocused ? UI_ACCENT : UI_RULE), 0, 0);
                 C.Codepoint = Cp;
                 F.Cells[(size_t)Y * W + Sx] = C;
             }

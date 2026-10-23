@@ -198,7 +198,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
 - Each visible tab's terminal and ConPTY are sized to its pane; off-screen tabs take the focused
   pane's size once a window resize settles. Mouse events go to the pane under the pointer (a drag
-  stays in its pane) in pane-relative coordinates; a click focuses the pane.
+  stays in its pane) in pane-relative coordinates; a click focuses the pane. The focused pane's accent edge
+  shows only while the window has the keyboard focus (`App.WindowUnfocused`, from the client's
+  focus reports `ESC [ I` / `ESC [ O`; reset when a window attaches).
 - Layouts are remembered per monitor: clients send `MSG_MONITOR` (`MonitorKey`: device name and
   resolution) on attach and when the window moves; the server switches to that monitor's last
   layout. The layout, panes and per-monitor layouts are saved in `tabs.txt`.
