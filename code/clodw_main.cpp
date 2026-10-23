@@ -65,6 +65,7 @@ struct clodw
     HMENU OpacityMenu;     // the window menu's Opacity submenu
     u32 Theme;             // index into Themes (settings "theme"); 0 = Clod
     HMENU ThemeMenu;
+    bool32 GoodProgrammer; // settings "good_programmer = on": claude started from now on gets ~\.clod\good-programmer.md
     bool32 Keeping;       // keeping the user active right now (the bar's light shows it)
     std::string ByeReason;
     std::vector<gpu_cell> Gpu;
@@ -184,6 +185,7 @@ static void CheckOpacity(const clodw& C)
 }
 
 #define IDM_THEME 0x0300 // + 16 * index into Themes
+#define IDM_GOOD_PROGRAMMER 0x0400 // "Be a good programmer" on/off
 
 // Ticks the Theme menu's entry for the current theme.
 static void CheckTheme(const clodw& C)
@@ -787,6 +789,15 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                 C->Dirty = true;
                 return 0;
             }
+            // Be a good programmer: the server appends the user's programming principles to the system
+            // prompt of each claude it starts from now on (and of `claude` typed in shells opened after).
+            if(Cmd == IDM_GOOD_PROGRAMMER)
+            {
+                C->GoodProgrammer = !C->GoodProgrammer;
+                CheckMenuItem(GetSystemMenu(Window, FALSE), IDM_GOOD_PROGRAMMER, MF_BYCOMMAND | (C->GoodProgrammer ? MF_CHECKED : MF_UNCHECKED));
+                WriteSetting("good_programmer", C->GoodProgrammer ? "on" : "off");
+                return 0;
+            }
             // Theme > Nord etc.: colors for the terminal and clod's bars; saved to settings.txt.
             if(Cmd >= IDM_THEME && Cmd < IDM_THEME + ArrayCount(Themes) * 16)
             {
@@ -1077,6 +1088,8 @@ static int WindowMain(s32 JumpToTab)
     AppendMenuW(WindowMenu, MF_POPUP, (UINT_PTR)C.ThemeMenu, L"Theme");
     CheckTheme(C);
     ApplyTitleBar(C);
+    C.GoodProgrammer = (ReadSetting("good_programmer") == "on");
+    AppendMenuW(WindowMenu, MF_STRING | (C.GoodProgrammer ? MF_CHECKED : 0), IDM_GOOD_PROGRAMMER, L"Be a good programmer");
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
 

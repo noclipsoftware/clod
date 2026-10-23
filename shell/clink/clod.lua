@@ -78,3 +78,9 @@ local clod_dir = os.getenv("CLOD_DIR")
 if clod_dir then
     os.setalias("view", '"'..clod_dir..'clod.exe" view $*')
 end
+
+-- --- "Be a good programmer" (clod window menu): a typed claude gets the principles file too ---
+local principles = os.getenv("CLOD_GOOD_PROGRAMMER")
+if principles then
+    os.setalias("claude", 'claude --append-system-prompt-file "'..principles..'" $*')
+end

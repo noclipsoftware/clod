@@ -92,6 +92,14 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   a mipmapped texture and the pixel shader draws it inside `ImageRect` (fitted, never above its own
   size at the window's DPI). Console clients get half blocks (`▀`/`▄`, two pixels a cell) from
   Compose.
+- "Be a good programmer" (clodw's window menu, a checkmark; `good_programmer = on` in settings.txt,
+  missing = off): the user's programming principles, `~\.clod\good-programmer.md` (seeded from
+  `shell/good-programmer.md`; else clod's default copy), go to claude as
+  `--append-system-prompt-file`. `StartTab` reads the setting at every start, and while it's on
+  gives the tab `CLOD_GOOD_PROGRAMMER`, which clod.lua turns into a `claude` alias, so a typed
+  claude gets it too. A change reaches claude started after it; a conversation that already
+  recorded its system prompt (Claude Code's `--system-prompt-snapshot`, on by default) keeps it
+  until it's compacted.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in
