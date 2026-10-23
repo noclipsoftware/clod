@@ -41,19 +41,16 @@ failed capture (`python tools\screenshot\capture.py [--scene shell]`).
 
 ## 3. Build and preview
 
-In `C:\UnitySrc\kevin.gd`: `python build.py` (it warns if `content\content.json` is missing). Serve
-`build\` (`python -m http.server 8000 --directory build`, unless it's already running) and open
-http://localhost:8000/clod/ for the user. Wait for their approval; iterate if asked.
+Follow kevin.gd's `preview` skill (`C:\UnitySrc\kevin.gd\.claude\skills\preview\SKILL.md`; it
+doesn't load in a clod session, so read the file): it builds, serves `build\` and opens a page.
+Open http://localhost:8000/clod/ for the user. Wait for their approval; iterate if asked.
 
 ## 4. Deploy (only when the user says so)
 
-Publishing is public: confirm with the user right before it, every time.
-
-- `public\` in kevin.gd is a git submodule (the GitHub Pages repo). If it's empty, run
-  `git submodule update --init` there first.
-- `python deploy.py` in kevin.gd pulls `public\`, builds, copies `build\` in, commits "update" and
-  pushes. That's the live site.
-- Then ask whether to commit the sources too: this repo (`content\`, CLAUDE.md, tools) and kevin.gd.
+Follow kevin.gd's `deploy` skill (`C:\UnitySrc\kevin.gd\.claude\skills\deploy\SKILL.md`, read the
+file): build, privacy scan, the user's go-ahead, `public\` setup, `deploy.py`, a check of the live
+site at https://noclip.gd/clod/. Then ask whether to commit and push the sources too: this repo
+(`content\`, CLAUDE.md, tools) and kevin.gd (`public` pointer, any site changes).
 
 ## Screenshots (tools\screenshot)
 
