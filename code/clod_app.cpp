@@ -887,8 +887,23 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             FocusPane(App, K.Kind == KEY_DOWN ? 0 : 1);
             continue;
         }
-        // Pages: Ctrl+Alt+PgUp/PgDn step through them, clodw's Ctrl+Alt+1-9 jump.
-        if((K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && K.Mods == (KMOD_CTRL | KMOD_ALT))
+        // Alt+Insert/Home/Delete/End pick a pane the way those keys sit on a keyboard: Insert top left,
+        // Home top right, Delete bottom left, End bottom right. Side by side: left / right column;
+        // main + 2: Insert/Delete the main pane, Home and End the right two. A single pane: the program's.
+        bool32 Block = K.Kind == KEY_INSERT || K.Kind == KEY_HOME || K.Kind == KEY_DELETE || K.Kind == KEY_END;
+        if(Block && K.Mods == KMOD_ALT && App.Layout != LAYOUT_SINGLE)
+        {
+            bool32 Right = (K.Kind == KEY_HOME || K.Kind == KEY_END);
+            bool32 Bottom = (K.Kind == KEY_DELETE || K.Kind == KEY_END);
+            s32 Pane = 0;
+            if(App.Layout == LAYOUT_GRID) { Pane = (Bottom ? 2 : 0) + (Right ? 1 : 0); }
+            else if(App.Layout == LAYOUT_SIDE) { Pane = Right ? 1 : 0; }
+            else { Pane = Right ? (Bottom ? 2 : 1) : 0; }
+            FocusPane(App, Pane);
+            continue;
+        }
+        // Pages: Alt+PgUp/PgDn step through them, clodw's Ctrl+Alt+1-9 jump.
+        if((K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && K.Mods == KMOD_ALT)
         {
             if(App.Pages.size() < 2)
             {
@@ -1622,7 +1637,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 {
                     GX = PutText(F, GX, GY, " " + std::to_string(G + 1) + " ", G == App.Page ? BarActive : BarShown, Right) + 1;
                 }
-                static const char* PageKeys[] = {"P", "new page", "X", "close page", "[ ]", "switch", "Ctrl+Alt+PgUp/PgDn", "anywhere"};
+                static const char* PageKeys[] = {"P", "new page", "X", "close page", "[ ]", "switch", "Alt+PgUp/PgDn", "anywhere"};
                 GX += 2;
                 for(u32 I = 0; I + 1 < ArrayCount(PageKeys); I += 2)
                 {

@@ -155,7 +155,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
   2x2 grid, main + 2; only Ctrl+Shift+Alt+up/right/down/left switch them, anywhere; Alt+Q / Alt+Shift+Q cycle the focus
   anywhere, Alt+arrows pick a pane (grid: up = top left, right = top right, left = bottom left,
-  down = bottom right; side by side: down = left, right = right; otherwise they reach the program), ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
+  down = bottom right; side by side: down = left, right = right; otherwise they reach the program),
+  Alt+Insert/Home/Delete/End pick a pane as those keys sit on a keyboard (Insert top left, Home
+  top right, Delete bottom left, End bottom right; side by side by column; main + 2: Insert/Delete
+  the main pane, Home/End the right two; a single pane lets them reach the program), ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
   or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
   Picking a tab another pane shows (Enter or its number on the home screen, Alt+number) swaps the
   two panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
@@ -185,7 +188,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   page), the current entry refreshed when leaving it (`GoToPage`, `LoadPage`, `NewPage`,
   `ClosePage`). A tab is in at most one pane of all pages: picking one that's on another page
   moves it here (its pane there goes home); `UnshownTab` and cycling skip tabs on other pages, and
-  a tab on another page counts as unseen (notices). Ctrl+Alt+PgUp/PgDn step through pages
+  a tab on another page counts as unseen (notices). Alt+PgUp/PgDn step through pages
   anywhere, clodw's Ctrl+Alt+1-9 jump (CSI 7778 ; N ~, `KEY_GO_PAGE`); on the home screen `P` new
   page (same layout, panes home), `X` close page (its tabs keep running), `[`/`]` switch. Pages
   show as numbers in the top bar (more than one; a click switches) and on the home screen's
