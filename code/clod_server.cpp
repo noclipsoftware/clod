@@ -1251,6 +1251,7 @@ static int ServerMain()
         }
         // Status messages expire on their own.
         if(!App.Status.empty() && NowMs >= App.StatusUntil) { App.Status.clear(); Dirty = true; }
+        if(App.CycleShownUntil && NowMs >= App.CycleShownUntil) { App.CycleShownUntil = 0; Dirty = true; } // the tab switcher box goes
     }
 
     // --- shutdown: tell the window, then hang up every child at once so they exit in parallel ---

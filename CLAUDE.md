@@ -133,7 +133,8 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   Picking a tab another pane shows (Enter or its number on the home screen, Alt+number) swaps the
   two panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
   cycling (Ctrl+PgUp/PgDn, clodw Ctrl+Tab) skips such tabs and the home screen and never moves the
-  focus (`CycleTab`). `App.Active` is always the
+  focus (`CycleTab`). Each step shows a tab switcher box in the focused pane for 1.2 s (`App.CycleShownUntil`,
+  drawn last in Compose): the tabs the cycle goes through, the current one in the accent; any other key takes it down. `App.Active` is always the
   focused pane's tab, so code that uses `ActiveTab` (keys, prompts, the command bar) still works.
 - clod is modal, and the mode is what the focused pane shows. In a tab every key goes to the
   program except the prefix, which takes the pane to the home screen with that tab selected and

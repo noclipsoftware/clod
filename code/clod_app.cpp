@@ -108,6 +108,7 @@ struct app_state
     s32 ListScroll;
 
     u32 PrefixKey;      // the control byte that starts a clod command (settings "prefix"; server default Ctrl+\)
+    u64 CycleShownUntil; // the tab switcher box shows until then (ms; Ctrl+Tab, Ctrl+PgUp/PgDn); 0 = not shown
     tab* CameFrom;      // the tab the focused pane showed before the prefix brought it home: Esc goes back
     s32 Prompt;
     tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
@@ -701,6 +702,9 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         tab* Tab = ActiveTab(App);
+        // The tab switcher box stays up only while tabs are being cycled: any other key takes it down.
+        bool32 Cycling = (K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && K.Mods == KMOD_CTRL;
+        if(!Cycling && K.Kind != KEY_MOUSE) { App.CycleShownUntil = 0; }
 
         // --- folder prompt: edit the path for a new session ---
         if(App.Prompt == PROMPT_NEW_FOLDER)
@@ -795,8 +799,12 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             FocusPane(App, K.Kind == KEY_DOWN ? 0 : 1);
             continue;
         }
-        if(K.Kind == KEY_PGUP && K.Mods == KMOD_CTRL) { CycleTab(App, -1); continue; }
-        if(K.Kind == KEY_PGDN && K.Mods == KMOD_CTRL) { CycleTab(App, 1); continue; }
+        if(Cycling)
+        {
+            CycleTab(App, K.Kind == KEY_PGDN ? 1 : -1);
+            App.CycleShownUntil = NowMs + 1200; // the switcher box (Compose), a moment past the last step
+            continue;
+        }
         if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint >= '0' && K.Codepoint <= '9') { SwitchTab(App, (s32)(K.Codepoint - '0')); continue; }
 
         // --- mouse ---
@@ -1582,6 +1590,50 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             const tab* T = App.PaneTab[Pane];
             std::string Name = T ? TabName(*T) : std::string("Home");
             PutText(F, PR.X + 1, PR.Y - 1, " " + TruncateText(Name, Max(PR.W - 4, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
+        }
+    }
+
+    // --- tab switcher: for a moment after each Ctrl+Tab / Ctrl+PgUp/PgDn, a box in the focused pane
+    // lists the tabs the cycle goes through (those no other pane shows), the one now here in the accent ---
+    if(NowMs < App.CycleShownUntil)
+    {
+        pane_rect PR = PaneRect(App, App.Focus);
+        const tab* Here = App.PaneTab[App.Focus];
+        std::vector<const tab*> Ring;
+        s32 NameW = 0;
+        s32 Current = 0;
+        for(const tab* T : App.Tabs)
+        {
+            s32 Shown = PaneShowing(App, T);
+            if(Shown >= 0 && Shown != App.Focus) { continue; }
+            if(T == Here) { Current = (s32)Ring.size(); }
+            Ring.push_back(T);
+            NameW = Max(NameW, TextWidth(TabName(*T)));
+        }
+        s32 BoxW = Min(NameW + 9, PR.W - 2);
+        s32 BoxH = Min((s32)Ring.size() + 2, PR.H);
+        if(BoxW >= 12 && BoxH >= 3)
+        {
+            s32 X0 = PR.X + (PR.W - BoxW) / 2;
+            s32 Y0 = PR.Y + (PR.H - BoxH) / 2;
+            s32 X1 = X0 + BoxW;
+            cell Box = Style(Ui(UI_BAR_TEXT), Ui(UI_BAR), 0);
+            cell BoxDim = Style(Ui(UI_DIM), Ui(UI_BAR), 0);
+            for(s32 R = 0; R < BoxH; ++R) { FillRow(F, Y0 + R, X0, X1, Box); }
+            PutText(F, X0 + 2, Y0, "Tabs", BoxDim, X1);
+            // A long list scrolls so the current tab stays in view.
+            s32 Rows = BoxH - 2;
+            s32 First = Clamp(Current - Rows / 2, 0, Max(0, (s32)Ring.size() - Rows));
+            for(s32 R = 0; R < Rows && First + R < (s32)Ring.size(); ++R)
+            {
+                const tab* T = Ring[First + R];
+                cell S = (T == Here) ? BarActive : Box;
+                FillRow(F, Y0 + 1 + R, X0 + 1, X1 - 1, S);
+                std::string Num = std::to_string(TabIndex(App, T));
+                PutText(F, X0 + 4 - TextWidth(Num), Y0 + 1 + R, Num, (T == Here) ? S : BoxDim, X1 - 1);
+                PutText(F, X0 + 6, Y0 + 1 + R, TruncateText(TabName(*T), BoxW - 8), S, X1 - 1);
+            }
+            F.CursorHidden = true;
         }
     }
 }
