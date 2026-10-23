@@ -186,6 +186,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing
   its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
+- Alt+` goes to the tab that has waited longest for you, wherever it is: a claude that needs input
+  first (`tab::WantsSinceMs`, set when it starts needing input or gets a notice), else one with a
+  notice; its page comes up and its pane gets the focus (a tab no pane shows comes into the focused
+  pane). The tab already in the focused pane is skipped; with none, "Nothing needs you".
 - Pages (like tmux's windows): each is a layout plus what its panes show and its focus. The
   current page lives in `Layout`/`Focus`/`PaneTab`; `App.Pages` holds all of them (empty = one
   page), the current entry refreshed when leaving it (`GoToPage`, `LoadPage`, `NewPage`,

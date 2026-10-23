@@ -1134,10 +1134,15 @@ static int ServerMain()
             if(!Why.empty() && ClientCells && Why != "Bell" && Why != "Claude needs your attention") { ToClient += "\x07"; }
             // Claude ringing or notifying (a permission prompt, a question) waits for the user: the home
             // screen lists it under "Needs input" until something is typed into it or a turn starts.
-            if(!T->SessionId.empty() && !Why.empty() && Why != "Claude finished") { T->NeedsInput = true; }
+            if(!T->SessionId.empty() && !Why.empty() && Why != "Claude finished")
+            {
+                if(!T->NeedsInput) { T->WantsSinceMs = NowMs; } // waiting since the first ask
+                T->NeedsInput = true;
+            }
             // Off screen it waits on the home screen and the top bar until some pane shows it.
             if(!Why.empty() && PaneShowing(App, T) < 0)
             {
+                if(T->Notice.empty() && !T->NeedsInput) { T->WantsSinceMs = NowMs; }
                 T->Notice = (Why == "Claude finished") ? "finished" : (Why == "Claude needs your attention") ? "needs you" : (Why == "Bell") ? "bell" : Why;
             }
             if(!Why.empty() && Unseen && NowMs - T->NotifiedAtMs > 10000)

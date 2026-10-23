@@ -26,6 +26,7 @@ struct tab
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     bool32 NeedsInput;      // claude asked for the user (bell, OSC 9) and nothing has been typed into it since
+    u64 WantsSinceMs;       // when it began to need input, or got its notice (Alt+` goes to the longest waiting)
     u64 NotifiedAtMs;       // last tray notification about this tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
     std::string HistorySaved; // what that file holds, to skip rewriting it unchanged
@@ -920,6 +921,33 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 App.StatusUntil = NowMs + 3000;
             }
             GoToPage(App, App.Page + (K.Kind == KEY_PGDN ? 1 : -1));
+            continue;
+        }
+        // Alt+`: to the tab that has waited longest for you, wherever it is: one that needs input
+        // first, else one with a notice (finished while unseen). Its page comes up and its pane gets
+        // the focus; one no pane shows comes into the focused pane. The tab already here is skipped.
+        if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == '`')
+        {
+            tab* Want = 0;
+            for(s32 Pass = 0; Pass < 2 && !Want; ++Pass)
+            {
+                for(tab* T : App.Tabs)
+                {
+                    bool32 Wants = (Pass == 0) ? T->NeedsInput : !T->Notice.empty();
+                    if(Wants && T != ActiveTab(App) && (!Want || T->WantsSinceMs < Want->WantsSinceMs)) { Want = T; }
+                }
+            }
+            if(!Want)
+            {
+                App.Status = "Nothing needs you";
+                App.StatusUntil = NowMs + 2000;
+                continue;
+            }
+            s32 OnPage = OtherPageShowing(App, Want);
+            if(OnPage >= 0) { GoToPage(App, OnPage); }
+            s32 Pane = PaneShowing(App, Want);
+            if(Pane >= 0) { FocusPane(App, Pane); }
+            else { SwitchTab(App, TabIndex(App, Want)); }
             continue;
         }
         if(K.Kind == KEY_GO_PAGE)
