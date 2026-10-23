@@ -213,16 +213,6 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         if(!Inner.empty()) { Inner += L" & "; }
         Inner += L"\"" + Clink + L"\" inject --quiet --profile \"" + ClodDir + L"clink\"";
     }
-    // --- "Be a good programmer" (clodw's window menu; settings good_programmer = on): claude gets the
-    // user's programming principles appended to its system prompt, from ~\.clod\good-programmer.md
-    // (else clod's default copy). Read at every start, so a change reaches each claude started after it ---
-    std::wstring Principles;
-    if(ReadSetting("good_programmer") == "on")
-    {
-        Principles = ClodDir + L"good-programmer.md";
-        if(GetFileAttributesW(Principles.c_str()) == INVALID_FILE_ATTRIBUTES) { Principles = ExeDir() + L"shell\\good-programmer.md"; }
-        if(GetFileAttributesW(Principles.c_str()) == INVALID_FILE_ATTRIBUTES) { Principles.clear(); }
-    }
     if(!Tab.SessionId.empty())
     {
         if(!Inner.empty()) { Inner += L" & "; }
@@ -238,7 +228,6 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         {
             bool32 Resume = SessionFileExists(Tab.SessionId);
             Inner += L"cd /d \"" + Cwd + L"\" & " + Claude + (Resume ? L" --resume " : L" --session-id ") + Utf8ToWide(Tab.SessionId);
-            if(!Principles.empty()) { Inner += L" --append-system-prompt-file \"" + Principles + L"\""; }
             Tab.LaunchedAtMs = NowMs;
         }
     }
@@ -253,7 +242,6 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
         L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
         L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"CLOD_DIR",
-        L"CLOD_GOOD_PROGRAMMER",
     };
     std::wstring Env;
     wchar_t* Block = GetEnvironmentStringsW();
@@ -284,12 +272,6 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
     // Where clod.exe is (with a trailing backslash), so the shell can run `clod view` (clod.lua's alias).
     Env += L"CLOD_DIR=" + ExeDir();
     Env.push_back(0);
-    // The principles file while "Be a good programmer" is on: clod.lua makes a typed `claude` use it too.
-    if(!Principles.empty())
-    {
-        Env += L"CLOD_GOOD_PROGRAMMER=" + Principles;
-        Env.push_back(0);
-    }
     Env.push_back(0);
 
     std::string Error;

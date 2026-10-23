@@ -65,7 +65,6 @@ struct clodw
     HMENU OpacityMenu;     // the window menu's Opacity submenu
     u32 Theme;             // index into Themes (settings "theme"); 0 = Clod
     HMENU ThemeMenu;
-    bool32 GoodProgrammer; // settings "good_programmer = on": claude started from now on gets ~\.clod\good-programmer.md
     bool32 Keeping;       // keeping the user active right now (the bar's light shows it)
     std::string ByeReason;
     std::vector<gpu_cell> Gpu;
@@ -186,6 +185,76 @@ static void CheckOpacity(const clodw& C)
 
 #define IDM_THEME 0x0300 // + 16 * index into Themes
 #define IDM_GOOD_PROGRAMMER 0x0400 // "Be a good programmer" on/off
+
+// "Be a good programmer" lives in the user's global CLAUDE.md, which every Claude Code session on the
+// machine reads (in clod or not): on = the principles (~\.clod\good-programmer.md) sit there between
+// these markers, off = they don't. The rest of the file is the user's and is kept as it is.
+static const char GoodStart[] = "<!-- clod: Be a good programmer (start). The clod window menu adds and removes this block. -->";
+static const char GoodEnd[] = "<!-- clod: Be a good programmer (end) -->";
+
+// <CLAUDE_CONFIG_DIR or ~\.claude>\CLAUDE.md
+static std::wstring GlobalClaudeMd()
+{
+    wchar_t Dir[MAX_PATH] = {};
+    if(!GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", Dir, MAX_PATH))
+    {
+        GetEnvironmentVariableW(L"USERPROFILE", Dir, MAX_PATH);
+        wcscat_s(Dir, L"\\.claude");
+    }
+    return std::wstring(Dir) + L"\\CLAUDE.md";
+}
+
+static std::string ReadWholeFile(const std::wstring& Path)
+{
+    std::string Out;
+    FILE* File = 0;
+    _wfopen_s(&File, Path.c_str(), L"rb");
+    char Buf[4096];
+    for(size_t N = 0; File && (N = fread(Buf, 1, sizeof(Buf), File)) > 0;) { Out.append(Buf, N); }
+    if(File) { fclose(File); }
+    return Out;
+}
+
+// Puts the principles block into the global CLAUDE.md (On) or takes it out. False when the file
+// couldn't be written or there are no principles to add.
+static bool32 SetGoodProgrammer(bool32 On)
+{
+    std::wstring Path = GlobalClaudeMd();
+    std::string Md = ReadWholeFile(Path);
+
+    // --- drop the block (and the blank line clod put before it), wherever it is ---
+    size_t Start = Md.find(GoodStart);
+    size_t End = (Start == std::string::npos) ? std::string::npos : Md.find(GoodEnd, Start);
+    if(End != std::string::npos)
+    {
+        End += sizeof(GoodEnd) - 1;
+        while(End < Md.size() && (Md[End] == '\r' || Md[End] == '\n')) { ++End; }
+        while(Start > 0 && (Md[Start - 1] == '\r' || Md[Start - 1] == '\n')) { --Start; }
+        Md.erase(Start, End - Start);
+        if(!Md.empty()) { Md += "\r\n"; }
+    }
+
+    // --- add it at the end, from the user's copy (else clod's default) ---
+    if(On)
+    {
+        std::string Principles = ReadWholeFile(UserClodDir() + L"good-programmer.md");
+        if(Principles.empty()) { Principles = ReadWholeFile(ExeDir() + L"shell\\good-programmer.md"); }
+        if(Principles.empty()) { return false; }
+        while(!Principles.empty() && strchr("\r\n", Principles.back())) { Principles.pop_back(); }
+        Md += (Md.empty() ? "" : "\r\n") + std::string(GoodStart) + "\r\n" + Principles + "\r\n" + GoodEnd + "\r\n";
+    }
+
+    // --- write beside it, then swap in, so a session reading it never sees half a file ---
+    std::wstring Dir = Path.substr(0, Path.find_last_of(L'\\'));
+    CreateDirectoryW(Dir.c_str(), 0);
+    std::wstring Temp = Path + L".clod-tmp";
+    FILE* File = 0;
+    _wfopen_s(&File, Temp.c_str(), L"wb");
+    if(!File) { return false; }
+    bool32 Ok = fwrite(Md.data(), 1, Md.size(), File) == Md.size();
+    fclose(File);
+    return Ok && MoveFileExW(Temp.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
 
 // Ticks the Theme menu's entry for the current theme.
 static void CheckTheme(const clodw& C)
@@ -776,6 +845,13 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             return 0;
 
         // --- Font... in the window menu: any installed font; applied now and saved to settings.txt ---
+        // The window menu opening: "Be a good programmer" is ticked while the global CLAUDE.md has the
+        // block (it may have been edited since).
+        case WM_INITMENU:
+        {
+            bool32 On = ReadWholeFile(GlobalClaudeMd()).find(GoodStart) != std::string::npos;
+            CheckMenuItem(GetSystemMenu(Window, FALSE), IDM_GOOD_PROGRAMMER, MF_BYCOMMAND | (On ? MF_CHECKED : MF_UNCHECKED));
+        } break;
         case WM_SYSCOMMAND:
         {
             // Opacity > 85% etc.: the terminal's background lets the desktop through; saved to settings.txt.
@@ -793,9 +869,12 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             // prompt of each claude it starts from now on (and of `claude` typed in shells opened after).
             if(Cmd == IDM_GOOD_PROGRAMMER)
             {
-                C->GoodProgrammer = !C->GoodProgrammer;
-                CheckMenuItem(GetSystemMenu(Window, FALSE), IDM_GOOD_PROGRAMMER, MF_BYCOMMAND | (C->GoodProgrammer ? MF_CHECKED : MF_UNCHECKED));
-                WriteSetting("good_programmer", C->GoodProgrammer ? "on" : "off");
+                bool32 On = ReadWholeFile(GlobalClaudeMd()).find(GoodStart) == std::string::npos;
+                if(!SetGoodProgrammer(On))
+                {
+                    std::wstring Text = L"Couldn't update " + GlobalClaudeMd();
+                    MessageBoxW(Window, Text.c_str(), L"clod", MB_OK | MB_ICONWARNING);
+                }
                 return 0;
             }
             // Theme > Nord etc.: colors for the terminal and clod's bars; saved to settings.txt.
@@ -1088,8 +1167,7 @@ static int WindowMain(s32 JumpToTab)
     AppendMenuW(WindowMenu, MF_POPUP, (UINT_PTR)C.ThemeMenu, L"Theme");
     CheckTheme(C);
     ApplyTitleBar(C);
-    C.GoodProgrammer = (ReadSetting("good_programmer") == "on");
-    AppendMenuW(WindowMenu, MF_STRING | (C.GoodProgrammer ? MF_CHECKED : 0), IDM_GOOD_PROGRAMMER, L"Be a good programmer");
+    AppendMenuW(WindowMenu, MF_STRING, IDM_GOOD_PROGRAMMER, L"Be a good programmer");
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
 
