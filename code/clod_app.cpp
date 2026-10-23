@@ -924,7 +924,8 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             continue;
         }
         // Alt+\: to the tab that has waited longest for you, wherever it is: one that needs input
-        // first, else one with a notice (finished while unseen). Its page comes up and its pane gets
+        // first, else one with a notice (finished while unseen), else the next claude that's working
+        // (in tab order after this one, so presses go round them). Its page comes up and its pane gets
         // the focus; one no pane shows comes into the focused pane. The tab already here is skipped.
         if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == '\\' && App.PrefixKey != (PREFIX_ALT | '\\'))
         {
@@ -937,9 +938,15 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                     if(Wants && T != ActiveTab(App) && (!Want || T->WantsSinceMs < Want->WantsSinceMs)) { Want = T; }
                 }
             }
+            s32 Count = (s32)App.Tabs.size();
+            for(s32 I = 1; I <= Count && !Want; ++I)
+            {
+                tab* T = App.Tabs[(Max(App.Active, 1) - 1 + I) % Count];
+                if(T->TitleBusy && T != ActiveTab(App)) { Want = T; }
+            }
             if(!Want)
             {
-                App.Status = "Nothing needs you";
+                App.Status = "Nothing needs you or is working";
                 App.StatusUntil = NowMs + 2000;
                 continue;
             }
