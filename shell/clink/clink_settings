@@ -27,3 +27,10 @@ color.histexpand = bright white on magenta
 color.readonly = green
 color.selection = black on bright yellow
 color.unrecognized = bright red
+
+# name: Case insensitive matching
+# type: enum
+# options: off,on,relaxed
+# "on", not clink's default "relaxed": relaxed treats - and _ as equal, so completing handm next to
+# handmade-hero and handmade_hero_source inserted handmade_hero, a name neither has.
+match.ignore_case = on
