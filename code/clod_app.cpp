@@ -953,10 +953,6 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 else if(C == 'k') { HomeMoveSelection(App, -1); }
                 else if(C == 'j') { HomeMoveSelection(App, 1); }
                 else if(C >= '1' && C <= '9') { SwitchTab(App, (s32)(C - '0')); }
-                else if(C == 'z') { SetLayout(App, LAYOUT_SINGLE); }
-                else if(C == 'v') { SetLayout(App, LAYOUT_SIDE); }
-                else if(C == 'g') { SetLayout(App, LAYOUT_GRID); }
-                else if(C == 'b') { SetLayout(App, LAYOUT_MAIN); }
                 else if(C == 'n') { NewSession(Cmds, HomeCwd(App)); }
                 else if(C == 'o') { OpenFolderPrompt(App, HomeCwd(App)); }
                 else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = HomeCwd(App); Cmds.push_back(S); }
@@ -1261,7 +1257,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             static const char* HomeKeys[] = {
                 "Enter", "show here", "1-9", "show N", "\xE2\x86\x90\xE2\x86\x92", "pane", "x", "close", "R", "restart",
-                "z/v/g/b", "layout", "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
+                "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
             };
             const char** Keys = HomeKeys;
             s32 KeyCount = Active ? 0 : (s32)ArrayCount(HomeKeys); // in a tab the left stays empty

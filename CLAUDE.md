@@ -126,7 +126,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 ## Panes
 
 - The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
-  2x2 grid, main + 2; `z`/`v`/`g`/`b` on the home screen, Ctrl+Shift+Alt+up/right/down/left anywhere; Alt+Q / Alt+Shift+Q cycle the focus
+  2x2 grid, main + 2; only Ctrl+Shift+Alt+up/right/down/left switch them, anywhere; Alt+Q / Alt+Shift+Q cycle the focus
   anywhere, Alt+arrows pick a pane (grid: up = top left, right = top right, left = bottom left,
   down = bottom right; side by side: down = left, right = right; otherwise they reach the program), ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
   or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
@@ -139,7 +139,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   program except the prefix, which takes the pane to the home screen with that tab selected and
   remembered (`App.CameFrom`). On the home screen clod takes every key, single letters with no
   prefix: Enter/1-9 show a tab here, ←/→/Tab move to another pane, `t`/`n`/`N`/`o` start new ones
-  (in `HomeCwd`: the remembered tab's folder), `x` close, `R` restart, `z`/`v`/`g`/`b` layouts, `/`
+  (in `HomeCwd`: the remembered tab's folder), `x` close, `R` restart, `/`
   filter, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
   There is no armed-prefix state and no prefix + key chords.
 - The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
