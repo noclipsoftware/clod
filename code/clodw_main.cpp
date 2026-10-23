@@ -25,7 +25,7 @@ struct clodw
     s32 CursorShape; // DECSCUSR from the server (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
     s32 PaneCount;
     s32 Panes[4][4]; // pane rectangles {x, y, w, h}: a selection stays inside one
-    u32 PaneMouseTaken; // bit per pane: the program there (or the sessions page) takes the mouse
+    u32 PaneMouseTaken; // bit per pane: the program there (or the home screen) takes the mouse
     std::string Title;
 
     // --- selection, in cells (inclusive): drag, or Shift+drag while a program has the mouse ---
@@ -1174,7 +1174,8 @@ static int WindowMain(s32 JumpToTab)
                         case 'T': Command = 't'; break; // new shell
                         case 'N': Command = 'c'; break; // new session in this folder
                         case 'O': Command = 'o'; break; // new session in a folder you type
-                        case 'S': Command = 's'; break; // sessions page
+                        case 'S': Command = 'h'; break; // home screen
+                        case VK_SPACE: Command = 'h'; break;
                         case 'W': Command = 'x'; break; // close tab (asks y/n)
                     }
                 }

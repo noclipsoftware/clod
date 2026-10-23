@@ -402,7 +402,7 @@ static std::wstring TabsFilePath()
 
 static std::string TabsFileContents(const app_state& App)
 {
-    // Also the layout, focus and what each pane shows (tab numbers, 0 = sessions page), and the
+    // Also the layout, focus and what each pane shows (tab numbers, 0 = home screen), and the
     // layout each monitor last used.
     std::string Out = "active\t" + std::to_string(App.Active) + "\n";
     Out += "layout\t" + std::to_string(App.Layout) + "\t" + std::to_string(App.Focus);
@@ -596,7 +596,7 @@ static int ServerMain()
                 OpenTab(App, !Claude, F[1], Claude ? std::string() : F[1], F[2], F[3], Claude ? F[4] : std::string(), Job, Wake, GetTickCount64());
             }
         }
-        // --- the saved layout, with each pane's tab when that tab came back (else the sessions page) ---
+        // --- the saved layout, with each pane's tab when that tab came back (else the home screen) ---
         if(!SavedLayout.empty())
         {
             App.Layout = Clamp(atoi(SavedLayout[1].c_str()), 0, LAYOUT_MAIN);
@@ -946,7 +946,7 @@ static int ServerMain()
                 ToClient += T->Term.PassThrough;
                 T->Term.PassThrough.clear();
                 TabSyncScroll(*T);
-                if(PaneShowing(App, T) < 0) { T->Activity = true; } // off screen: mark it in the tab bar
+                if(PaneShowing(App, T) < 0) { T->Activity = true; } // off screen: the home screen says so
                 if(T == ActiveTab(App) && T->Term.SyncOutput && !WasSync) { SyncSinceMs = NowMs; }
                 Dirty = true;
 
@@ -981,6 +981,11 @@ static int ServerMain()
             HWND ClientRoot = ClientWindow ? GetAncestor(ClientWindow, GA_ROOTOWNER) : 0;
             bool32 Unseen = !Attached || PaneShowing(App, T) < 0 || (ClientRoot && GetForegroundWindow() != ClientRoot);
             if(!Why.empty() && ClientCells && Why != "Bell" && Why != "Claude needs your attention") { ToClient += "\x07"; }
+            // Off screen it waits on the home screen and the top bar until some pane shows it.
+            if(!Why.empty() && PaneShowing(App, T) < 0)
+            {
+                T->Notice = (Why == "Claude finished") ? "finished" : (Why == "Claude needs your attention") ? "needs you" : (Why == "Bell") ? "bell" : Why;
+            }
             if(!Why.empty() && Unseen && NowMs - T->NotifiedAtMs > 10000)
             {
                 TrayNotify(Tray, TabName(*T), Why, I + 1);
@@ -1111,7 +1116,7 @@ static int ServerMain()
             FILETIME Ft = {};
             GetSystemTimeAsFileTime(&Ft);
             u64 NowFt = ((u64)Ft.dwHighDateTime << 32) | Ft.dwLowDateTime;
-            Compose(App, NowMs, NowFt, Next, App.TabHits);
+            Compose(App, NowMs, NowFt, Next, App.BarHits);
 
             OutBytes.clear();
             // Track motion only when the active child wants hover events; otherwise clicks, drags and wheel.

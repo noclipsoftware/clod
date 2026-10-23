@@ -8,7 +8,7 @@ side-effects-at-edges); those rules apply here, match them.
 
 A Windows terminal tab manager for Claude Code sessions, in C++ (MSVC unity build, `build.bat`).
 Each tab is a real `cmd.exe` (running the repo's `shell\init.bat`, with clink) in its own ConPTY, and is a
-claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites the active one between a tab bar (top row) and a command bar (bottom row), tmux-style.
+claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites what the panes show between a top bar and a command bar (bottom row), tmux-style.
 It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, Git Bash in WT).
 
 ## Process architecture
@@ -108,10 +108,17 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 - The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
   2x2 grid, main + 2; prefix `z`/`v`/`g`/`b`; Alt+Q / Alt+Shift+Q cycle the focus, prefix
   arrows move it by direction; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
-  or the sessions page (`PaneTab[]`, null = sessions page); **a tab is never in two panes**.
-  Picking a tab another pane shows (its number, a click) focuses that pane (`SwitchTab`);
+  or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
+  Picking a tab another pane shows (Enter on the home screen, prefix + its number) swaps the two
+  panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
   cycling (Ctrl+PgUp/PgDn, prefix `n`/`p`) skips such tabs and never moves the focus (`CycleTab`). `App.Active` is always the
   focused pane's tab, so code that uses `ActiveTab` (keys, prompts, the command bar) still works.
+- The home screen (prefix `h`, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
+  counts) is where a pane picks what it shows: "Running" lists every tab (number, name, what it's
+  doing, folder; `x` closes the selected one), then keys for new ones, then the Claude Code
+  sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
+  shows it. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
+  `tab::Notice`, shown there and counted in the top bar until a pane shows it.
 - Changing layout keeps the focused tab on screen and fills new panes with tabs nothing shows
   (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
 - Each visible tab's terminal and ConPTY are sized to its pane; off-screen tabs take the focused
@@ -192,7 +199,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   stops the server but keeps `tabs.txt`. It asks first only if some claude tab is mid-reply
   (`tab::TitleBusy`) or some shell tab is running a program (its cmd has a child process).
   An idle shell at its prompt or an idle claude doesn't count.
-- In the clod window, `q` (sessions page) and prefix `q` only **detach**. Stop and end-all are
+- In the clod window, `q` (home screen) and prefix `q` only **detach**. Stop and end-all are
   not reachable from the window UI. A tab is dropped only by closing it (prefix `x`) or by `exit`
   in its cmd. Claude exiting returns the tab to its shell.
 - The command prefix is `Ctrl+\` by default (`prefix = ctrl+...` in `~\.clod\settings.txt`, read on
@@ -200,10 +207,12 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   sends the key itself. The command bar lists the prefix commands only while the prefix is armed
   (whole entries, dropped when they don't fit); otherwise, in a tab, its left side is empty and the
   right shows only a grey "Ctrl+\ commands" (status and scroll position take that spot when
-  present). clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W) that it sends as prefix +
+  present). clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W/Space) that it sends as prefix +
   key, using the `PrefixKey` the server puts in each `MSG_CELLS` header.
-- The top bar shows **only tabs**. Commands, the close-tab prompt, status messages and the
-  scroll position all live in the bottom command bar.
+- The top bar shows **only** the name of what each top pane shows (above it; the focused one in
+  the accent; lower panes' names sit on their rule) and, on the right, how many tabs run and how
+  many want a look. No tab list: switching happens on the home screen. Commands, the close-tab
+  prompt, status messages and the scroll position all live in the bottom command bar.
 
 ## Character widths (subtle; read before touching CharWidth or RenderFrame)
 

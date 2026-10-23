@@ -51,7 +51,7 @@ struct msg_cells
     s32 CursorShape; // DECSCUSR value (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
     s32 PaneCount;   // pane rectangles {x, y, w, h} in cells: a selection stays inside its pane
     s32 Panes[4][4];
-    u32 PaneMouseTaken; // bit per pane: the program there (or the sessions page) takes the mouse
+    u32 PaneMouseTaken; // bit per pane: the program there (or the home screen) takes the mouse
     u32 TitleLen;
     u32 RowCount;
 };

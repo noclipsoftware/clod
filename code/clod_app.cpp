@@ -1,4 +1,4 @@
-// App core: tabs, the sessions page, input handling and frame composition.
+// App core: tabs, the home screen, input handling and frame composition.
 // No OS calls here. Input handling emits app_commands for the platform layer to execute;
 // composition turns app state into a cell grid; rendering diffs two grids into VT bytes.
 
@@ -18,7 +18,8 @@ struct tab
     std::string Title;      // from the session file; used when the child sets no title
     s32 ScrollOffset;       // lines scrolled back from live output; 0 = following
     u64 SeenPushed;         // Term.ScrollbackPushed as of the last scroll fix-up
-    bool32 Activity;        // output arrived while in the background
+    bool32 Activity;        // output arrived while no pane showed it
+    std::string Notice;     // why it wants a look ("finished", "needs you", ...), set while no pane showed it
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     u64 NotifiedAtMs;       // last tray notification about this tab
@@ -28,7 +29,7 @@ struct tab
     pty* Pty;
 };
 
-// Rows a tab's child gets: the window minus the tab bar (top) and the command bar (bottom).
+// Rows a tab's child gets: the window minus the top bar and the command bar (bottom).
 static s32 ContentRows(s32 Height) { return Max(1, Height - 2); }
 
 enum app_prompt
@@ -38,15 +39,16 @@ enum app_prompt
     PROMPT_NEW_FOLDER, // command bar edits PathInput; Enter starts a new session there
 };
 
-struct tab_hit
+// A clickable span of the top bar: a pane's name (focuses it), or Pane -1 (the counts: home).
+struct bar_hit
 {
     s32 X0;
     s32 X1;
-    s32 Index;
+    s32 Pane;
 };
 
 // Panes split the area between the bars; each shows one tab (no tab in two panes) or the
-// sessions page.
+// home screen.
 enum app_layout
 {
     LAYOUT_SINGLE = 0,
@@ -77,11 +79,11 @@ struct app_state
     s32 Width;
     s32 Height;
     std::vector<tab*> Tabs;
-    s32 Active; // what the focused pane shows: 0 = sessions page, N = Tabs[N - 1]
+    s32 Active; // what the focused pane shows: 0 = home screen, N = Tabs[N - 1]
 
     s32 Layout;                // LAYOUT_*
     s32 Focus;                 // the pane that gets the keys
-    tab* PaneTab[MAX_PANES];   // what each pane shows; null = the sessions page
+    tab* PaneTab[MAX_PANES];   // what each pane shows; null = the home screen
     s32 DragPane;              // pane + 1 a mouse button went down in (the drag stays there); 0 = none
     std::string Monitor;       // the attached window's monitor, as the client reports it
     std::vector<monitor_layout> MonitorLayouts;
@@ -89,12 +91,13 @@ struct app_state
     std::vector<session_info> Sessions;
     std::string Filter;
     bool32 FilterEditing;
-    s32 Selected; // index into the filtered list
+    s32 Selected; // home screen: 0..Tabs-1 = a running tab, then the filtered sessions
     s32 ListScroll;
 
     u32 PrefixKey;      // the control byte that starts a clod command (settings "prefix"; server default Ctrl+\)
     bool32 PrefixArmed;
     s32 Prompt;
+    tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
     std::string PathInput;
     bool32 MouseCaptureOff;
     bool32 InPaste;
@@ -102,7 +105,7 @@ struct app_state
     std::string Status;
     u64 StatusUntil; // GetTickCount64 ms
     std::string LaunchCwd;
-    std::vector<tab_hit> TabHits; // from the last composed frame
+    std::vector<bar_hit> BarHits; // from the last composed frame
     bool32 Quit; // set by the server (tray Quit): stop, reopening the tabs with --resume next launch
 };
 
@@ -222,24 +225,24 @@ static void FocusPane(app_state& App, s32 Pane)
 {
     App.Focus = Clamp(Pane, 0, PaneCount(App.Layout) - 1);
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
-    if(App.PaneTab[App.Focus]) { App.PaneTab[App.Focus]->Activity = false; }
+    if(App.PaneTab[App.Focus]) { App.PaneTab[App.Focus]->Activity = false; App.PaneTab[App.Focus]->Notice.clear(); }
 }
 
-// Shows tab Index (0 = sessions page) in the focused pane. A tab another pane already shows isn't
-// moved: that pane gets the focus instead.
+// Shows tab Index (0 = home screen) in the focused pane. A tab another pane shows swaps places:
+// that pane gets what this one had.
 static void SwitchTab(app_state& App, s32 Index)
 {
     if(Index < 0 || Index > (s32)App.Tabs.size()) { return; }
     tab* T = (Index > 0) ? App.Tabs[Index - 1] : 0;
     s32 Shown = PaneShowing(App, T);
-    if(Shown >= 0) { App.Focus = Shown; }
-    else { App.PaneTab[App.Focus] = T; }
+    if(Shown >= 0) { App.PaneTab[Shown] = App.PaneTab[App.Focus]; }
+    App.PaneTab[App.Focus] = T;
     App.Active = Index;
-    if(T) { T->Activity = false; }
+    if(T) { T->Activity = false; T->Notice.clear(); }
 }
 
-// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes show (the sessions
-// page, 0, is always a stop): cycling never pulls a tab out of another pane or moves the focus.
+// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes show (the home
+// screen, 0, is always a stop): cycling never pulls a tab out of another pane or moves the focus.
 static void CycleTab(app_state& App, s32 Step)
 {
     s32 Count = (s32)App.Tabs.size() + 1;
@@ -252,7 +255,7 @@ static void CycleTab(app_state& App, s32 Step)
 }
 
 // Changes the layout. The focused tab stays on screen; new panes take tabs nothing shows yet (or
-// the sessions page); the monitor remembers the choice.
+// the home screen); the monitor remembers the choice.
 static void SetLayout(app_state& App, s32 Layout)
 {
     s32 Old = PaneCount(App.Layout);
@@ -272,10 +275,11 @@ static void SetLayout(app_state& App, s32 Layout)
     if(!Known && !App.Monitor.empty()) { App.MonitorLayouts.push_back(monitor_layout{App.Monitor, Layout}); }
 }
 
-// Before tab T goes away: panes showing it take the next tab nothing shows (or the sessions page).
+// Before tab T goes away: panes showing it take the next tab nothing shows (or the home screen).
 // The caller removes T from Tabs and then sets Active from the focused pane.
 static void ForgetTab(app_state& App, const tab* T)
 {
+    if(App.PromptTab == T) { App.PromptTab = 0; App.Prompt = PROMPT_NONE; }
     s32 From = TabIndex(App, T); // the position just after T
     for(s32 P = 0; P < MAX_PANES; ++P)
     {
@@ -351,25 +355,35 @@ static tab* FindTabBySession(const app_state& App, const std::string& Id, s32* I
     return 0;
 }
 
-// --- sessions page layout, relative to its pane: title, filter, column heads, then the list ---
-#define HOME_LIST_ROW 3
-static s32 HomeListRows(s32 PaneH) { return Max(1, PaneH - HOME_LIST_ROW); }
+// --- home screen layout, relative to its pane: "Running" and a row per tab (at least one), the keys
+// for new ones, a blank row, then the Claude Code sessions: title, filter, column heads, the list ---
+static s32 HomeSessionsRow(const app_state& App) { return 1 + Max((s32)App.Tabs.size(), 1) + 2; }
+static s32 HomeListRow(const app_state& App) { return HomeSessionsRow(App) + 3; }
+static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH - HomeListRow(App)); }
 
-// Moves the selection, scrolling the list as the focused pane shows it.
+// Moves the selection through the running tabs and on into the sessions, scrolling the sessions
+// list as the focused pane shows it.
 static void HomeMoveSelection(app_state& App, s32 Delta)
 {
-    s32 Count = (s32)FilterSessions(App).size();
+    s32 Running = (s32)App.Tabs.size();
+    s32 Count = Running + (s32)FilterSessions(App).size();
     App.Selected = Clamp(App.Selected + Delta, 0, Max(0, Count - 1));
-    s32 Rows = HomeListRows(PaneRect(App, App.Focus).H);
-    if(App.Selected < App.ListScroll) { App.ListScroll = App.Selected; }
-    if(App.Selected >= App.ListScroll + Rows) { App.ListScroll = App.Selected - Rows + 1; }
+    s32 Rows = HomeListRows(App, PaneRect(App, App.Focus).H);
+    s32 S = App.Selected - Running; // in the sessions list
+    if(S < 0) { return; }
+    if(S < App.ListScroll) { App.ListScroll = S; }
+    if(S >= App.ListScroll + Rows) { App.ListScroll = S - Rows + 1; }
 }
 
+// Enter on the home screen: a running tab comes into this pane, a session opens (or its tab does).
 static void OpenSelected(app_state& App, std::vector<app_command>& Cmds)
 {
+    s32 Running = (s32)App.Tabs.size();
+    if(App.Selected >= 0 && App.Selected < Running) { SwitchTab(App, App.Selected + 1); return; }
     std::vector<s32> Filtered = FilterSessions(App);
-    if(App.Selected < 0 || App.Selected >= (s32)Filtered.size()) { return; }
-    const session_info& S = App.Sessions[Filtered[App.Selected]];
+    s32 Index = App.Selected - Running;
+    if(Index < 0 || Index >= (s32)Filtered.size()) { return; }
+    const session_info& S = App.Sessions[Filtered[Index]];
     s32 Existing = 0;
     if(FindTabBySession(App, S.Id, &Existing)) { SwitchTab(App, Existing); return; }
     app_command C = {};
@@ -586,7 +600,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             {
                 for(char C : App.PasteBuf) { if((u8)C >= 0x20) { App.Filter += C; } }
                 App.FilterEditing = true;
-                App.Selected = 0;
+                App.Selected = (s32)App.Tabs.size(); // the first match
                 App.ListScroll = 0;
             }
             else if(!Tab->Exited)
@@ -650,7 +664,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             else if(C == 'c') { NewSession(Cmds, Tab ? Tab->Cwd : App.LaunchCwd); }
             else if(C == 'o') { OpenFolderPrompt(App, Tab ? Tab->Cwd : App.LaunchCwd); }
             else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = Tab ? Tab->Cwd : App.LaunchCwd; Cmds.push_back(S); }
-            else if(C == 'x' && Tab) { App.Prompt = PROMPT_CLOSE_TAB; }
+            else if(C == 'x' && Tab) { App.Prompt = PROMPT_CLOSE_TAB; App.PromptTab = Tab; }
             else if(C == 'r' && Tab) { app_command R = {}; R.Kind = CMD_RESTART; R.Tab = Tab; Cmds.push_back(R); }
             else if(C == 'q' || C == 'd') { app_command D = {}; D.Kind = CMD_DETACH; Cmds.push_back(D); }
             else if(C == 'm')
@@ -694,14 +708,15 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         {
             if(K.Kind == KEY_MOUSE) { continue; }
             u32 C = (K.Kind == KEY_CHAR) ? (K.Codepoint | 0x20) : 0; // lower-case ASCII letters
-            if(C == 'y' && App.Prompt == PROMPT_CLOSE_TAB && Tab)
+            if(C == 'y' && App.Prompt == PROMPT_CLOSE_TAB && App.PromptTab)
             {
                 app_command Close = {};
                 Close.Kind = CMD_CLOSE;
-                Close.Tab = Tab;
+                Close.Tab = App.PromptTab;
                 Cmds.push_back(Close);
             }
             App.Prompt = PROMPT_NONE;
+            App.PromptTab = 0;
             continue;
         }
 
@@ -731,9 +746,11 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             {
                 if(LeftPress)
                 {
-                    for(const tab_hit& H : App.TabHits)
+                    for(const bar_hit& H : App.BarHits)
                     {
-                        if(K.MouseX - 1 >= H.X0 && K.MouseX - 1 < H.X1) { SwitchTab(App, H.Index); }
+                        if(K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
+                        if(H.Pane < 0) { SwitchTab(App, 0); }
+                        else { FocusPane(App, H.Pane); }
                     }
                 }
                 continue;
@@ -766,15 +783,20 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
 
             if(!Target)
             {
-                if(Wheel) { HomeMoveSelection(App, (Button & 1) ? 3 : -3); }
-                else if(LeftPress && Y - 1 >= HOME_LIST_ROW && Y - 1 < HOME_LIST_ROW + HomeListRows(R.H))
+                // --- home screen: a click selects a running tab or a session, a second click opens it ---
+                s32 Running = (s32)App.Tabs.size();
+                s32 Clicked = -1;
+                if(Y - 1 >= 1 && Y - 1 <= Running) { Clicked = Y - 2; }
+                s32 ListRow = HomeListRow(App);
+                if(Y - 1 >= ListRow && Y - 1 < ListRow + HomeListRows(App, R.H) && App.ListScroll + (Y - 1 - ListRow) < (s32)FilterSessions(App).size())
                 {
-                    s32 Clicked = App.ListScroll + (Y - 1 - HOME_LIST_ROW);
-                    if(Clicked < (s32)FilterSessions(App).size())
-                    {
-                        if(Clicked == App.Selected) { OpenSelected(App, Cmds); }
-                        else { App.Selected = Clicked; }
-                    }
+                    Clicked = Running + App.ListScroll + (Y - 1 - ListRow);
+                }
+                if(Wheel) { HomeMoveSelection(App, (Button & 1) ? 3 : -3); }
+                else if(LeftPress && Clicked >= 0)
+                {
+                    if(Clicked == App.Selected) { OpenSelected(App, Cmds); }
+                    else { App.Selected = Clicked; }
                 }
                 continue;
             }
@@ -804,21 +826,23 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             continue;
         }
 
-        // --- sessions page ---
+        // --- home screen ---
         if(!Tab)
         {
+            s32 Running = (s32)App.Tabs.size();
+            tab* SelectedTab = (App.Selected >= 0 && App.Selected < Running) ? App.Tabs[App.Selected] : 0;
             bool32 Typing = App.FilterEditing && K.Kind == KEY_CHAR && !(K.Mods & (KMOD_CTRL | KMOD_ALT));
             if(Typing)
             {
                 AppendUtf8(App.Filter, K.Codepoint);
-                App.Selected = 0;
+                App.Selected = Running; // the first match
                 App.ListScroll = 0;
             }
             else if(K.Kind == KEY_BACKSPACE && App.FilterEditing)
             {
                 while(!App.Filter.empty() && ((u8)App.Filter.back() & 0xC0) == 0x80) { App.Filter.pop_back(); }
                 if(!App.Filter.empty()) { App.Filter.pop_back(); }
-                App.Selected = 0;
+                App.Selected = Running;
                 App.ListScroll = 0;
             }
             else if(K.Kind == KEY_ESC)
@@ -830,8 +854,8 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             }
             else if(K.Kind == KEY_UP) { HomeMoveSelection(App, -1); }
             else if(K.Kind == KEY_DOWN) { HomeMoveSelection(App, 1); }
-            else if(K.Kind == KEY_PGUP) { HomeMoveSelection(App, -HomeListRows(PaneRect(App, App.Focus).H)); }
-            else if(K.Kind == KEY_PGDN) { HomeMoveSelection(App, HomeListRows(PaneRect(App, App.Focus).H)); }
+            else if(K.Kind == KEY_PGUP) { HomeMoveSelection(App, -HomeListRows(App, PaneRect(App, App.Focus).H)); }
+            else if(K.Kind == KEY_PGDN) { HomeMoveSelection(App, HomeListRows(App, PaneRect(App, App.Focus).H)); }
             else if(K.Kind == KEY_HOME) { HomeMoveSelection(App, -1000000); }
             else if(K.Kind == KEY_END) { HomeMoveSelection(App, 1000000); }
             else if(K.Kind == KEY_ENTER) { App.FilterEditing = false; OpenSelected(App, Cmds); }
@@ -848,9 +872,12 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = App.LaunchCwd; Cmds.push_back(S); }
                 else if(C == 'N')
                 {
+                    // In the selected tab's or session's folder.
                     std::vector<s32> Filtered = FilterSessions(App);
-                    if(App.Selected < (s32)Filtered.size()) { NewSession(Cmds, App.Sessions[Filtered[App.Selected]].Cwd); }
+                    if(SelectedTab) { NewSession(Cmds, SelectedTab->Cwd); }
+                    else if(App.Selected - Running < (s32)Filtered.size()) { NewSession(Cmds, App.Sessions[Filtered[App.Selected - Running]].Cwd); }
                 }
+                else if(C == 'x' && SelectedTab) { App.Prompt = PROMPT_CLOSE_TAB; App.PromptTab = SelectedTab; }
                 else if(C == 'r') { app_command R = {}; R.Kind = CMD_RESCAN; Cmds.push_back(R); }
                 else if(C == 'q') { app_command D = {}; D.Kind = CMD_DETACH; Cmds.push_back(D); }
             }
@@ -991,7 +1018,7 @@ static const u32 UiDefault[UI_COUNT] = {
     COLOR_RGB | 0xD77757, Rgb(20, 20, 20), Rgb(70, 35, 25), Rgb(240, 200, 120), Rgb(110, 200, 120),
 };
 
-static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, std::vector<tab_hit>& Hits)
+static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, std::vector<bar_hit>& Hits)
 {
     s32 W = App.Width;
     s32 H = App.Height;
@@ -1013,29 +1040,50 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     cell Dim = Style(Ui(UI_DIM), 0, 0);
     cell Accent = Style(Ui(UI_ACCENT), 0, ATTR_BOLD);
 
-    // --- tab bar: tabs only ---
+    // --- top bar: the name of what each top pane shows, above it (the focused one in the accent);
+    // on the right how many tabs run and how many want a look. Lower panes' names sit on their rule ---
     FillRow(F, 0, 0, W, Bar);
-    s32 TabCount = (s32)App.Tabs.size();
-    s32 MaxLabel = Clamp((W - 14) / Max(TabCount, 1) - 5, 6, 32);
-    s32 X = 0;
-    for(s32 I = 0; I <= TabCount; ++I)
+    s32 NamesEnd = 0;
+    for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
     {
-        const tab* T = (I > 0) ? App.Tabs[I - 1] : 0;
-        bool32 IsActive = (I == App.Active);
-        bool32 Shown = !IsActive && T && PaneShowing(App, T) >= 0;
-        cell S = IsActive ? BarActive : (Shown ? BarShown : (T && T->Exited ? BarDim : Bar));
-        s32 X0 = X;
-        X = PutText(F, X, 0, " " + std::to_string(I) + " ", S, W);
-        if(T && T->Activity && !IsActive) { X = PutText(F, X, 0, "\xE2\x97\x8F ", Style(Ui(UI_ACCENT), S.Bg, 0), W); } // ●
-        X = PutText(F, X, 0, T ? TruncateText(TabName(*T), MaxLabel) : std::string("Sessions"), S, W);
-        X = PutText(F, X, 0, " ", S, W);
-        tab_hit Hit = {X0, X, I};
+        pane_rect PR = PaneRect(App, Pane);
+        if(PR.Y != 1) { continue; }
+        const tab* T = App.PaneTab[Pane];
+        std::string Name = T ? std::to_string(TabIndex(App, T)) + " " + TabName(*T) : std::string("Home");
+        s32 X0 = PR.X;
+        s32 X = PutText(F, X0, 0, " " + TruncateText(Name, Max(PR.W - 3, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
+        bar_hit Hit = {X0, X, Pane};
         Hits.push_back(Hit);
-        X = PutText(F, X, 0, " ", Bar, W);
+        NamesEnd = Max(NamesEnd, X);
+    }
+    {
+        s32 Notices = 0;
+        bool32 AllFinished = true;
+        for(const tab* T : App.Tabs)
+        {
+            if(T->Notice.empty()) { continue; }
+            Notices += 1;
+            AllFinished = AllFinished && T->Notice == "finished";
+        }
+        std::string Count = std::to_string(App.Tabs.size()) + " running";
+        std::string Note = Notices ? "\xE2\x97\x8F " + std::to_string(Notices) + (AllFinished ? " finished" : " new") : std::string(); // ●
+        s32 Width = TextWidth(Count) + (Notices ? 3 + TextWidth(Note) : 0);
+        s32 RX = W - Width - 1;
+        if(RX >= NamesEnd + 2)
+        {
+            s32 X = PutText(F, RX, 0, Count, Bar, W);
+            if(Notices)
+            {
+                X = PutText(F, X, 0, " \xC2\xB7 ", BarDim, W); // ·
+                X = PutText(F, X, 0, Note, Style(Ui(UI_ACCENT), Ui(UI_BAR), ATTR_BOLD), W);
+            }
+            bar_hit Hit = {RX, X, -1};
+            Hits.push_back(Hit);
+        }
     }
 
     // --- command bar (bottom row) ---
-    // Normally: prefix commands in a tab, page keys on the sessions page, plus status or scroll
+    // Normally: prefix commands in a tab, page keys on the home screen, plus status or scroll
     // position on the right. Turns orange while the prefix waits for its second key or a y/n is asked.
     if(H >= 2)
     {
@@ -1051,7 +1099,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
 
         if(Asking)
         {
-            std::string Question = "Close tab " + std::to_string(App.Active) + (Active ? " \"" + TruncateText(TabName(*Active), 40) + "\"" : std::string()) + "?";
+            const tab* Asked = App.PromptTab;
+            std::string Question = Asked ? "Close " + std::to_string(TabIndex(App, Asked)) + " \"" + TruncateText(TabName(*Asked), 40) + "\" and end what it runs?" : std::string("Close?");
             s32 BX = PutText(F, 1, Y, Question, KeyStyle, W) + 3;
             BX = PutText(F, BX, Y, "y", KeyStyle, W);
             BX = PutText(F, BX, Y, " close", LabelStyle, W) + 2;
@@ -1085,12 +1134,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         else
         {
             static const char* PrefixKeys[] = {
-                "0-9", "tab", "n/p", "next/prev", "c", "new", "o", "folder", "t", "shell", "x", "close",
-                "z/v/g/b", "layout", "arrows", "pane", "r", "restart", "s", "sessions", "m", "mouse", "q", "detach",
+                "h", "home", "0-9", "show", "n/p", "next/prev", "c", "new", "o", "folder", "t", "shell", "x", "close",
+                "z/v/g/b", "layout", "arrows", "pane", "r", "restart", "m", "mouse", "q", "detach",
             };
             static const char* HomeKeys[] = {
-                "Enter", "open", "\xE2\x86\x91\xE2\x86\x93", "select", "/", "filter", "n", "new here",
-                "N", "new in project", "o", "new in folder", "t", "shell", "r", "rescan", "q", "detach",
+                "Enter", "show here", "\xE2\x86\x91\xE2\x86\x93", "select", "/", "filter", "x", "close",
+                "r", "rescan", "q", "detach",
             };
             const char** Keys = HomeKeys;
             s32 KeyCount = (s32)ArrayCount(HomeKeys);
@@ -1133,14 +1182,14 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         }
     }
 
-    // --- panes: each draws its tab, or the sessions page, inside its own rectangle ---
+    // --- panes: each draws its tab, or the home screen, inside its own rectangle ---
     F.PaneCount = PaneCount(App.Layout);
     for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
     {
         F.Panes[Pane] = PaneRect(App, Pane);
         pane_rect PR = PaneRect(App, Pane);
         const tab* PaneTab = App.PaneTab[Pane];
-        // The sessions page takes clicks itself; a program gets them as in HandleInput.
+        // The home screen takes clicks itself; a program gets them as in HandleInput.
         bool32 Taken = !PaneTab || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited);
         if(Taken && !App.MouseCaptureOff) { F.PaneMouseTaken |= 1u << Pane; } // capture off: every drag selects
         bool32 Focused = (Pane == App.Focus);
@@ -1198,49 +1247,99 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             continue;
         }
 
-        // --- sessions page ---
+        // --- home screen: the running tabs, keys for new ones, then the Claude Code sessions ---
+        s32 Running = (s32)App.Tabs.size();
+        cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
+        s32 RX = PutText(F, Left + 1, Top, "Running", Style(0, 0, ATTR_BOLD), Right);
+        PutText(F, RX + 2, Top, std::to_string(Running), Dim, Right);
+        if(Running == 0) { PutText(F, Left + 5, Top + 1, "Nothing running yet.", Dim, Right); }
+        s32 NameX = Left + 5;
+        s32 NameW = Clamp(PW / 3, 12, 40);
+        s32 StatusX = NameX + NameW + 2;
+        s32 CwdX = StatusX + 16;
+        for(s32 I = 0; I < Running; ++I)
+        {
+            const tab* T = App.Tabs[I];
+            s32 Y = Top + 1 + I;
+            bool32 Sel = Focused && App.Selected == I; // other panes' home screens show no selection
+            cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
+            cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
+            FillRow(F, Y, Left, Right, Row);
+            if(Sel) { PutText(F, Left + 1, Y, "\xE2\x80\xBA", Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD), Right); } // ›
+            // The number (prefix + digit shows it here) is in the accent while some pane shows the tab.
+            std::string Num = std::to_string(I + 1);
+            bool32 OnScreen = PaneShowing(App, T) >= 0;
+            PutText(F, Left + 4 - TextWidth(Num), Y, Num, OnScreen ? Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD) : RowDim, Right);
+            PutText(F, NameX, Y, TruncateText(TabName(*T), NameW), Sel ? Style(0, Row.Bg, ATTR_BOLD) : Row, Right);
+
+            // --- what it's doing: a notice outranks the rest ---
+            std::string Status = "at prompt";
+            cell StatusStyle = RowDim;
+            bool32 Shell = T->SessionId.empty();
+            if(T->Exited) { Status = "exited"; }
+            else if(!T->Notice.empty()) { Status = "\xE2\x97\x8F " + T->Notice; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD); } // ●
+            else if(!Shell) { Status = T->TitleBusy ? "working" : "idle"; if(T->TitleBusy) { StatusStyle = Style(Ui(UI_NOTE), Row.Bg, 0); } }
+            else if(!RunningCommand(T->Term.Title).empty()) { Status = "running"; StatusStyle = Style(Ui(UI_NOTE), Row.Bg, 0); }
+            else if(T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
+            PutText(F, StatusX, Y, TruncateText(Status, 15), StatusStyle, Right);
+            PutText(F, CwdX, Y, TruncateText(T->Cwd, Right - CwdX - 1), RowDim, Right);
+        }
+        {
+            static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
+            s32 KX = Left + 5;
+            s32 KY = Top + 1 + Max(Running, 1);
+            for(u32 I = 0; I + 1 < ArrayCount(NewKeys); I += 2)
+            {
+                if(KX + TextWidth(NewKeys[I]) + 1 + TextWidth(NewKeys[I + 1]) > Right) { break; }
+                KX = PutText(F, KX, KY, NewKeys[I], KeyText, Right);
+                KX = PutText(F, KX, KY, std::string(" ") + NewKeys[I + 1], Dim, Right) + 3;
+            }
+        }
+
+        s32 ST = Top + HomeSessionsRow(App);
         std::vector<s32> Filtered = FilterSessions(App);
-        s32 HX = PutText(F, Left + 1, Top, "Claude Code sessions", Style(0, 0, ATTR_BOLD), Right);
-        PutText(F, HX + 2, Top, std::to_string(Filtered.size()) + (App.Filter.empty() ? "" : " of " + std::to_string(App.Sessions.size())), Dim, Right);
+        s32 HX = PutText(F, Left + 1, ST, "Claude Code sessions", Style(0, 0, ATTR_BOLD), Right);
+        PutText(F, HX + 2, ST, std::to_string(Filtered.size()) + (App.Filter.empty() ? "" : " of " + std::to_string(App.Sessions.size())), Dim, Right);
         std::string Launch = "new sessions start in " + App.LaunchCwd;
-        if(Right - (HX + 16) >= TextWidth(Launch) + 1) { PutText(F, Right - TextWidth(Launch) - 1, Top, Launch, Dim, Right); }
+        if(Right - (HX + 16) >= TextWidth(Launch) + 1) { PutText(F, Right - TextWidth(Launch) - 1, ST, Launch, Dim, Right); }
 
         if(App.FilterEditing || !App.Filter.empty())
         {
-            s32 FX = PutText(F, Left + 1, Top + 1, "/ ", Accent, Right);
-            FX = PutText(F, FX, Top + 1, App.Filter, cell{}, Right);
+            s32 FX = PutText(F, Left + 1, ST + 1, "/ ", Accent, Right);
+            FX = PutText(F, FX, ST + 1, App.Filter, cell{}, Right);
             if(Focused && App.FilterEditing && FX < Right)
             {
                 F.CursorHidden = false;
                 F.CursorX = FX;
-                F.CursorY = Top + 1;
+                F.CursorY = ST + 1;
             }
         }
         else
         {
-            PutText(F, Left + 1, Top + 1, "/ to filter", Dim, Right);
+            PutText(F, Left + 1, ST + 1, "/ to filter", Dim, Right);
         }
 
         const s32 AgeW = 5;
         const s32 ProjW = 18;
         s32 ProjX = Left + 4 + AgeW + 1;
         s32 TitleX = ProjX + ProjW + 1;
-        PutText(F, Left + 4, Top + 2, "  AGE", Dim, Right);
-        PutText(F, ProjX, Top + 2, "PROJECT", Dim, Right);
-        PutText(F, TitleX, Top + 2, "TITLE", Dim, Right);
+        PutText(F, Left + 4, ST + 2, "  AGE", Dim, Right);
+        PutText(F, ProjX, ST + 2, "PROJECT", Dim, Right);
+        PutText(F, TitleX, ST + 2, "TITLE", Dim, Right);
 
-        s32 Rows = HomeListRows(PR.H);
+        s32 Rows = HomeListRows(App, PR.H);
+        s32 ListY = Top + HomeListRow(App);
         s32 Scroll = Clamp(App.ListScroll, 0, Max(0, (s32)Filtered.size() - Rows));
         if(Filtered.empty())
         {
-            PutText(F, Left + 4, Top + HOME_LIST_ROW, App.Sessions.empty() ? "No sessions found. Press n to start one." : "No matches.", Dim, Right);
+            PutText(F, Left + 4, ListY, App.Sessions.empty() ? "No sessions found. Press n to start one." : "No matches.", Dim, Right);
         }
-        for(s32 R = 0; R < Rows && Scroll + R < (s32)Filtered.size(); ++R)
+        for(s32 R = 0; R < Rows && Scroll + R < (s32)Filtered.size() && ListY + R < Top + PR.H; ++R)
         {
             s32 Index = Scroll + R;
             const session_info& S = App.Sessions[Filtered[Index]];
-            s32 Y = Top + HOME_LIST_ROW + R;
-            bool32 Sel = (Index == App.Selected);
+            s32 Y = ListY + R;
+            bool32 Sel = Focused && Running + Index == App.Selected;
             cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);
@@ -1290,6 +1389,16 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 C.Codepoint = Cp;
                 F.Cells[(size_t)Y * W + Sx] = C;
             }
+        }
+
+        // --- the names of panes below the top row, on the rule above each ---
+        for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
+        {
+            pane_rect PR = PaneRect(App, Pane);
+            if(PR.Y == 1) { continue; }
+            const tab* T = App.PaneTab[Pane];
+            std::string Name = T ? std::to_string(TabIndex(App, T)) + " " + TabName(*T) : std::string("Home");
+            PutText(F, PR.X + 1, PR.Y - 1, " " + TruncateText(Name, Max(PR.W - 4, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
         }
     }
 }

@@ -1,7 +1,7 @@
 // clod: a terminal tab manager for Claude Code sessions.
 //
 //   clod             open a window attached to the background server (starting it if needed)
-//   clod --tab N     same, switching to tab N (0 = sessions page)
+//   clod --tab N     same, switching to tab N (0 = home screen)
 //   clod --test      a throwaway instance for trying a new build next to the running clod: its own
 //                    server with no tray and no saved tabs, which ends when this window closes
 //   clod --server    the background server itself; started by the first client

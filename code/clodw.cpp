@@ -2,7 +2,7 @@
 // Direct3D 11 (glyphs from DirectWrite), instead of handing VT output to someone else's terminal.
 //
 //   clodw             open a window attached to the background server (starting it if needed)
-//   clodw --tab N     same, switching to tab N (0 = sessions page)
+//   clodw --tab N     same, switching to tab N (0 = home screen)
 //   clodw --test      a throwaway private server for trying a new build; it ends with the window
 //
 // Unity build: this file includes everything else.
