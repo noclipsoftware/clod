@@ -23,9 +23,31 @@ static s32 Max(s32 A, s32 B) { return A > B ? A : B; }
 // Color: 0 = terminal default, otherwise tagged in the top byte.
 #define COLOR_PALETTE 0x01000000u
 #define COLOR_RGB     0x02000000u
+#define COLOR_UI      0x03000000u // + a ui_color
 #define COLOR_TAG(c)  ((c) & 0xFF000000u)
 static u32 Palette(u32 Index) { return COLOR_PALETTE | (Index & 0xFF); }
 static u32 Rgb(u32 R, u32 G, u32 B) { return COLOR_RGB | ((R & 0xFF) << 16) | ((G & 0xFF) << 8) | (B & 0xFF); }
+
+// clod's own screen parts (bars, sessions page, pane rules) color by role, so clodw's themes can
+// recolor them. Console clients get UiDefault (clod_app.cpp).
+enum ui_color
+{
+    UI_BAR,           // tab bar and command bar background
+    UI_BAR_TEXT,
+    UI_BRIGHT,        // key names in the bar, a tab shown in another pane
+    UI_DIM,           // hints, ages, an exited tab
+    UI_SHOWN,         // background of a tab shown in another pane
+    UI_ROW,           // the selected row on the sessions page
+    UI_RULE,          // lines between panes
+    UI_PROJECT,       // project names on the sessions page
+    UI_ACCENT,        // the active tab, an armed prefix, the focused pane's edge
+    UI_ON_ACCENT,     // text on the accent
+    UI_ON_ACCENT_DIM,
+    UI_NOTE,          // status messages
+    UI_LIVE,          // a session that's open in a tab
+    UI_COUNT,
+};
+static u32 Ui(u32 Role) { return COLOR_UI | Role; }
 
 enum
 {

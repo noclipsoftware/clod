@@ -11,11 +11,14 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <sddl.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "../code/clod_base.h"
 #include "../code/clod_vt.cpp"
+#include "../code/clod_ipc.cpp" // RaiseForTyping, LatencyMark
 #include "../code/clod_pty.cpp"
 
 static void Pump(pty* P, vt_terminal& T, u32 Ms)

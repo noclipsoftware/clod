@@ -985,7 +985,11 @@ static s32 PutText(frame& F, s32 X, s32 Y, const std::string& S, cell Style, s32
     return X;
 }
 
-static const u32 ClaudeOrange = COLOR_RGB | 0xD77757;
+// What each ui_color is in a console client (clodw draws them in its theme's colors).
+static const u32 UiDefault[UI_COUNT] = {
+    Palette(236), Palette(250), Palette(255), Palette(244), Palette(240), Palette(237), Palette(240), Palette(110),
+    COLOR_RGB | 0xD77757, Rgb(20, 20, 20), Rgb(70, 35, 25), Rgb(240, 200, 120), Rgb(110, 200, 120),
+};
 
 static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, std::vector<tab_hit>& Hits)
 {
@@ -1002,12 +1006,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     if(W <= 0 || H <= 0) { return; }
 
     const tab* Active = ActiveTab(App);
-    cell Bar = Style(Palette(250), Palette(236), 0);
-    cell BarDim = Style(Palette(244), Palette(236), 0);
-    cell BarActive = Style(Rgb(20, 20, 20), ClaudeOrange, ATTR_BOLD);
-    cell BarShown = Style(Palette(255), Palette(240), 0); // visible in a pane that isn't focused
-    cell Dim = Style(Palette(244), 0, 0);
-    cell Accent = Style(ClaudeOrange, 0, ATTR_BOLD);
+    cell Bar = Style(Ui(UI_BAR_TEXT), Ui(UI_BAR), 0);
+    cell BarDim = Style(Ui(UI_DIM), Ui(UI_BAR), 0);
+    cell BarActive = Style(Ui(UI_ON_ACCENT), Ui(UI_ACCENT), ATTR_BOLD);
+    cell BarShown = Style(Ui(UI_BRIGHT), Ui(UI_SHOWN), 0); // visible in a pane that isn't focused
+    cell Dim = Style(Ui(UI_DIM), 0, 0);
+    cell Accent = Style(Ui(UI_ACCENT), 0, ATTR_BOLD);
 
     // --- tab bar: tabs only ---
     FillRow(F, 0, 0, W, Bar);
@@ -1022,7 +1026,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         cell S = IsActive ? BarActive : (Shown ? BarShown : (T && T->Exited ? BarDim : Bar));
         s32 X0 = X;
         X = PutText(F, X, 0, " " + std::to_string(I) + " ", S, W);
-        if(T && T->Activity && !IsActive) { X = PutText(F, X, 0, "\xE2\x97\x8F ", Style(ClaudeOrange, S.Bg, 0), W); } // ●
+        if(T && T->Activity && !IsActive) { X = PutText(F, X, 0, "\xE2\x97\x8F ", Style(Ui(UI_ACCENT), S.Bg, 0), W); } // ●
         X = PutText(F, X, 0, T ? TruncateText(TabName(*T), MaxLabel) : std::string("Sessions"), S, W);
         X = PutText(F, X, 0, " ", S, W);
         tab_hit Hit = {X0, X, I};
@@ -1040,9 +1044,9 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         bool32 Folder = (App.Prompt == PROMPT_NEW_FOLDER);
         bool32 Armed = App.PrefixArmed;
         bool32 Orange = Asking || Armed || Folder;
-        cell CmdBar = Orange ? Style(Rgb(20, 20, 20), ClaudeOrange, 0) : Bar;
-        cell KeyStyle = Style(Orange ? Rgb(20, 20, 20) : Palette(255), CmdBar.Bg, ATTR_BOLD);
-        cell LabelStyle = Style(Orange ? Rgb(70, 35, 25) : Palette(245), CmdBar.Bg, 0);
+        cell CmdBar = Orange ? Style(Ui(UI_ON_ACCENT), Ui(UI_ACCENT), 0) : Bar;
+        cell KeyStyle = Style(Ui(Orange ? UI_ON_ACCENT : UI_BRIGHT), CmdBar.Bg, ATTR_BOLD);
+        cell LabelStyle = Style(Ui(Orange ? UI_ON_ACCENT_DIM : UI_DIM), CmdBar.Bg, 0);
         FillRow(F, Y, 0, W, CmdBar);
 
         if(Asking)
@@ -1101,7 +1105,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else if(!App.Status.empty() && NowMs < App.StatusUntil)
             {
                 Right = App.Status;
-                RightStyle = Style(Rgb(240, 200, 120), CmdBar.Bg, ATTR_BOLD);
+                RightStyle = Style(Ui(UI_NOTE), CmdBar.Bg, ATTR_BOLD);
                 Important = true;
             }
             else if(Active && Active->ScrollOffset > 0)
@@ -1237,13 +1241,13 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             const session_info& S = App.Sessions[Filtered[Index]];
             s32 Y = Top + HOME_LIST_ROW + R;
             bool32 Sel = (Index == App.Selected);
-            cell Row = Sel ? Style(0, Palette(237), 0) : cell{};
-            cell RowDim = Style(Palette(244), Row.Bg, 0);
+            cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
+            cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);
 
-            if(Sel) { PutText(F, Left + 1, Y, "\xE2\x80\xBA", Style(ClaudeOrange, Row.Bg, ATTR_BOLD), Right); } // ›
+            if(Sel) { PutText(F, Left + 1, Y, "\xE2\x80\xBA", Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD), Right); } // ›
             s32 Dummy = 0;
-            if(FindTabBySession(App, S.Id, &Dummy)) { PutText(F, Left + 2, Y, "\xE2\x97\x8F", Style(Rgb(110, 200, 120), Row.Bg, 0), Right); } // ●
+            if(FindTabBySession(App, S.Id, &Dummy)) { PutText(F, Left + 2, Y, "\xE2\x97\x8F", Style(Ui(UI_LIVE), Row.Bg, 0), Right); } // ●
 
             // --- age, right aligned ---
             s64 Secs = NowFiletime > S.ModifiedTime ? (s64)((NowFiletime - S.ModifiedTime) / 10000000ull) : 0;
@@ -1255,7 +1259,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else { snprintf(Age, sizeof(Age), "%dmo", (int)(Secs / (86400 * 30))); }
             PutText(F, Left + 4 + AgeW - (s32)strlen(Age), Y, Age, RowDim, Right);
 
-            PutText(F, ProjX, Y, TruncateText(S.Project, ProjW), Style(Palette(110), Row.Bg, 0), Right);
+            PutText(F, ProjX, Y, TruncateText(S.Project, ProjW), Style(Ui(UI_PROJECT), Row.Bg, 0), Right);
             PutText(F, TitleX, Y, TruncateText(S.Title.empty() ? "(no prompt)" : S.Title, Right - TitleX - 1), Sel ? Style(0, Row.Bg, ATTR_BOLD) : Row, Right);
         }
     }
@@ -1282,7 +1286,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 if(OnV && !OnH && Y == SplitY && RightRule) { Cp = 0x251C; } // ├
                 bool32 Edge = (Sx == Focus.X - 1 || Sx == Focus.X + Focus.W) && Y >= Focus.Y - 1 && Y <= Focus.Y + Focus.H;
                 Edge = Edge || ((Y == Focus.Y - 1 || Y == Focus.Y + Focus.H) && Sx >= Focus.X - 1 && Sx <= Focus.X + Focus.W);
-                cell C = Style(Edge ? ClaudeOrange : Palette(240), 0, 0);
+                cell C = Style(Ui(Edge ? UI_ACCENT : UI_RULE), 0, 0);
                 C.Codepoint = Cp;
                 F.Cells[(size_t)Y * W + Sx] = C;
             }
@@ -1295,6 +1299,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
 static void AppendColor(std::string& Out, u32 Color, bool32 Background)
 {
     char Buf[32];
+    if(COLOR_TAG(Color) == COLOR_UI) { Color = UiDefault[Min((s32)(Color & 0xFF), UI_COUNT - 1)]; }
     u32 Tag = COLOR_TAG(Color);
     if(Tag == COLOR_PALETTE)
     {

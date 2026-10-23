@@ -25,6 +25,7 @@
 #include <dwrite_2.h>
 #include <commdlg.h>
 #include <imm.h>
+#include <dwmapi.h>
 
 #include "clod_base.h"
 #include "clod_ipc.cpp"

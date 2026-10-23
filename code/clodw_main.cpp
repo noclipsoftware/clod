@@ -58,28 +58,86 @@ struct clodw
     bool32 KeepActiveOff;  // settings "keep_active = off": don't hold off Windows' idle (Slack's away)
     s32 Transparency;      // 100 - settings "opacity" (percent): 0 = opaque
     HMENU OpacityMenu;     // the window menu's Opacity submenu
-    bool32 Keeping;        // keeping the user active right now (the bar's light shows it)
+    u32 Theme;             // index into Themes (settings "theme"); 0 = Clod
+    HMENU ThemeMenu;
+    bool32 Keeping;       // keeping the user active right now (the bar's light shows it)
     std::string ByeReason;
     std::vector<gpu_cell> Gpu;
 };
 
-static const u32 DefaultFg = 204 | (204 << 8) | (204 << 16);
-static const u32 DefaultBg = 12 | (12 << 8) | (12 << 16);
+// A color theme, all 0xRRGGBB: the terminal's default colors, its 16 colors, the selection and
+// clod's own screen parts (ui_color order). Picked from the window menu's Theme submenu.
+struct theme
+{
+    const char* Name;
+    bool32 Light;  // light title bar
+    u32 Fg;
+    u32 Bg;
+    u32 Selection;
+    u32 Ansi[16];  // black red green yellow blue magenta cyan white, then the bright ones
+    u32 Ui[UI_COUNT];
+};
+
+static const theme Themes[] = {
+    // Clod: warm dark, around Claude's orange.
+    {"Clod", false, 0xD8D2C6, 0x1C1A18, 0x4A3A30,
+     {0x2B2826, 0xE5636F, 0x9CBF7E, 0xE3B65E, 0x78A6D8, 0xC590C8, 0x6FBFB2, 0xC9C2B5,
+      0x6E6861, 0xF4848E, 0xB5D69A, 0xF2CC84, 0x9BC0EF, 0xDCAEDD, 0x93D8CD, 0xF3EFE7},
+     {0x262321, 0xB8B0A3, 0xF3EFE7, 0x7D766D, 0x403B36, 0x302C29, 0x4A4540, 0x8FB3D9,
+      0xD97757, 0x1C1A18, 0x5A2A1C, 0xF0C878, 0x9CBF7E}},
+    // Clod Light: Claude's cream paper, the same orange.
+    {"Clod Light", true, 0x2E2B26, 0xF7F5F0, 0xF2D3C4,
+     {0x2E2B26, 0xC4363F, 0x4A7C2F, 0x9A6A00, 0x2F62B5, 0x8A4BA0, 0x1F7F78, 0x8F897F,
+      0x777168, 0xD94F58, 0x5C9440, 0xB58000, 0x4A7FD1, 0xA465BA, 0x2E9A92, 0xB9B3A8},
+     {0xEBE7DE, 0x4F4A42, 0x1F1C18, 0x8C857B, 0xDCD6CA, 0xE6E0D4, 0xCFC8BB, 0x2F62B5,
+      0xD97757, 0x1C1A18, 0x5A2A1C, 0x9A5A00, 0x3F8F3A}},
+    {"Tokyo Night", false, 0xC0CAF5, 0x1A1B26, 0x33467C,
+     {0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xA9B1D6,
+      0x414868, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xC0CAF5},
+     {0x16161E, 0xA9B1D6, 0xC0CAF5, 0x565F89, 0x292E42, 0x283457, 0x3B4261, 0x7DCFFF,
+      0x7AA2F7, 0x15161E, 0x283457, 0xE0AF68, 0x9ECE6A}},
+    {"Catppuccin Mocha", false, 0xCDD6F4, 0x1E1E2E, 0x45475A,
+     {0x45475A, 0xF38BA8, 0xA6E3A1, 0xF9E2AF, 0x89B4FA, 0xF5C2E7, 0x94E2D5, 0xBAC2DE,
+      0x585B70, 0xF38BA8, 0xA6E3A1, 0xF9E2AF, 0x89B4FA, 0xF5C2E7, 0x94E2D5, 0xA6ADC8},
+     {0x181825, 0xBAC2DE, 0xCDD6F4, 0x6C7086, 0x313244, 0x313244, 0x45475A, 0x89B4FA,
+      0xCBA6F7, 0x1E1E2E, 0x4C3A66, 0xF9E2AF, 0xA6E3A1}},
+    {"Nord", false, 0xD8DEE9, 0x2E3440, 0x434C5E,
+     {0x3B4252, 0xBF616A, 0xA3BE8C, 0xEBCB8B, 0x81A1C1, 0xB48EAD, 0x88C0D0, 0xE5E9F0,
+      0x4C566A, 0xBF616A, 0xA3BE8C, 0xEBCB8B, 0x81A1C1, 0xB48EAD, 0x8FBCBB, 0xECEFF4},
+     {0x3B4252, 0xD8DEE9, 0xECEFF4, 0x7B88A1, 0x4C566A, 0x3B4252, 0x4C566A, 0x81A1C1,
+      0x88C0D0, 0x2E3440, 0x3E5C69, 0xEBCB8B, 0xA3BE8C}},
+    {"Catppuccin Latte", true, 0x4C4F69, 0xEFF1F5, 0xCCD0DA,
+     {0x5C5F77, 0xD20F39, 0x40A02B, 0xDF8E1D, 0x1E66F5, 0xEA76CB, 0x179299, 0xACB0BE,
+      0x6C6F85, 0xD20F39, 0x40A02B, 0xDF8E1D, 0x1E66F5, 0xEA76CB, 0x179299, 0xBCC0CC},
+     {0xE6E9EF, 0x5C5F77, 0x4C4F69, 0x8C8FA1, 0xCCD0DA, 0xDCE0E8, 0xBCC0CC, 0x1E66F5,
+      0x8839EF, 0xEFF1F5, 0xD8C3F8, 0xC4700F, 0x40A02B}},
+    {"GitHub Light", true, 0x1F2328, 0xFFFFFF, 0xB6E3FF,
+     {0x24292F, 0xCF222E, 0x116329, 0x4D2D00, 0x0969DA, 0x8250DF, 0x1B7C83, 0x6E7781,
+      0x57606A, 0xA40E26, 0x1A7F37, 0x633C01, 0x218BFF, 0xA475F9, 0x3192AA, 0x8C959F},
+     {0xF6F8FA, 0x424A53, 0x1F2328, 0x6E7781, 0xEAEEF2, 0xDDF4FF, 0xD0D7DE, 0x0969DA,
+      0x0969DA, 0xFFFFFF, 0xC5DEFB, 0x9A6700, 0x1A7F37}},
+    // Campbell: Windows Terminal's default, which clodw used before themes.
+    {"Campbell", false, 0xCCCCCC, 0x0C0C0C, 0x264F78,
+     {0x0C0C0C, 0xC50F1F, 0x13A10E, 0xC19C00, 0x0037DA, 0x881798, 0x3A96DD, 0xCCCCCC,
+      0x767676, 0xE74856, 0x16C60C, 0xF9F1A5, 0x3B78FF, 0xB4009E, 0x61D6D6, 0xF2F2F2},
+     {0x303030, 0xBCBCBC, 0xEEEEEE, 0x808080, 0x585858, 0x3A3A3A, 0x585858, 0x87AFD7,
+      0xD77757, 0x141414, 0x462319, 0xF0C878, 0x6EC878}},
+};
 
 // Packs 0xRRGGBB-style components as the shader reads them (0x00BBGGRR).
 static u32 PackRgb(u32 R, u32 G, u32 B) { return R | (G << 8) | (B << 16); }
+static u32 PackHex(u32 Hex) { return PackRgb((Hex >> 16) & 255, (Hex >> 8) & 255, Hex & 255); }
 
-// A cell color (clod_base.h tags) as a packed RGB; untagged = the default.
-static u32 ResolveColor(u32 C, u32 Default)
+// A cell color (clod_base.h tags) as a packed RGB in theme T; untagged = DefaultHex.
+static u32 ResolveColor(u32 C, u32 DefaultHex, const theme& T)
 {
-    if(COLOR_TAG(C) == COLOR_RGB) { return PackRgb((C >> 16) & 255, (C >> 8) & 255, C & 255); }
-    if(COLOR_TAG(C) != COLOR_PALETTE) { return Default; }
+    if(COLOR_TAG(C) == COLOR_RGB || COLOR_TAG(C) == COLOR_UI)
+    {
+        return PackHex(COLOR_TAG(C) == COLOR_RGB ? C & 0xFFFFFF : T.Ui[Min((s32)(C & 255), UI_COUNT - 1)]);
+    }
+    if(COLOR_TAG(C) != COLOR_PALETTE) { return PackHex(DefaultHex); }
     u32 I = C & 255;
-    static const u32 Base[16][3] = {
-        {12, 12, 12}, {197, 15, 31}, {19, 161, 14}, {193, 156, 0}, {0, 55, 218}, {136, 23, 152}, {58, 150, 221}, {204, 204, 204},
-        {118, 118, 118}, {231, 72, 86}, {22, 198, 12}, {249, 241, 165}, {59, 120, 255}, {180, 0, 158}, {97, 214, 214}, {242, 242, 242},
-    };
-    if(I < 16) { return PackRgb(Base[I][0], Base[I][1], Base[I][2]); }
+    if(I < 16) { return PackHex(T.Ansi[I]); }
     if(I < 232)
     {
         static const u32 Level[6] = {0, 95, 135, 175, 215, 255};
@@ -102,6 +160,29 @@ static void CheckOpacity(const clodw& C)
     {
         CheckMenuItem(C.OpacityMenu, IDM_OPACITY + I * 16, MF_BYCOMMAND | (OpacitySteps[I] == 100 - C.Transparency ? MF_CHECKED : MF_UNCHECKED));
     }
+}
+
+#define IDM_THEME 0x0300 // + 16 * index into Themes
+
+// Ticks the Theme menu's entry for the current theme.
+static void CheckTheme(const clodw& C)
+{
+    for(u32 I = 0; I < ArrayCount(Themes); ++I)
+    {
+        CheckMenuItem(C.ThemeMenu, IDM_THEME + I * 16, MF_BYCOMMAND | (I == C.Theme ? MF_CHECKED : MF_UNCHECKED));
+    }
+}
+
+// The title bar in the theme: dark or light, and on Windows 11 the bars' own colors.
+static void ApplyTitleBar(const clodw& C)
+{
+    const theme& T = Themes[C.Theme];
+    BOOL Dark = !T.Light;
+    DwmSetWindowAttribute(C.Window, DWMWA_USE_IMMERSIVE_DARK_MODE, &Dark, sizeof(Dark));
+    COLORREF Caption = PackHex(T.Ui[UI_BAR]); // COLORREF is 0x00BBGGRR too
+    COLORREF Text = PackHex(T.Ui[UI_BAR_TEXT]);
+    DwmSetWindowAttribute(C.Window, DWMWA_CAPTION_COLOR, &Caption, sizeof(Caption));
+    DwmSetWindowAttribute(C.Window, DWMWA_TEXT_COLOR, &Text, sizeof(Text));
 }
 
 // Font size in pixels at the window's DPI; resets the glyph atlas.
@@ -360,6 +441,7 @@ static void Tick(clodw& C)
     C.Dirty = false;
 
     // --- the grid as GPU cells: colors resolved, glyph tiles looked up (drawn on first use) ---
+    const theme& Theme = Themes[C.Theme];
     // A full atlas empties the glyph cache and the pass runs again.
     size_t N = C.Grid.size();
     C.Gpu.assign(N, gpu_cell{});
@@ -372,10 +454,10 @@ static void Tick(clodw& C)
             {
                 size_t I = (size_t)Y * C.GridW + X;
                 const cell& K = C.Grid[I];
-                u32 Fg = ResolveColor(K.Fg, DefaultFg);
-                u32 Bg = ResolveColor(K.Bg, DefaultBg);
+                u32 Fg = ResolveColor(K.Fg, Theme.Fg, Theme);
+                u32 Bg = ResolveColor(K.Bg, Theme.Bg, Theme);
                 if(K.Attr & ATTR_INVERSE) { u32 T = Fg; Fg = Bg; Bg = T; }
-                if(K.Attr & ATTR_DIM) { Fg = (Fg >> 1) & 0x7F7F7F; }
+                if(K.Attr & ATTR_DIM) { Fg = ((Fg >> 1) & 0x7F7F7F) + ((Bg >> 1) & 0x7F7F7F); } // halfway to the background, dark or light
                 u32 Flags = ((K.Attr & ATTR_UNDERLINE) ? GPU_UNDERLINE : 0) | ((K.Attr & ATTR_STRIKE) ? GPU_STRIKE : 0);
                 bool32 Wide = (K.Flags & CELL_WIDE) && X + 1 < C.GridW;
                 u32 Cp = K.Codepoint;
@@ -465,7 +547,7 @@ static void Tick(clodw& C)
             s32 X1 = (Y == Ey) ? Ex : C.SelPane[0] + C.SelPane[2] - 1;
             for(s32 X = Max(X0, 0); X <= X1 && X < C.GridW; ++X)
             {
-                C.Gpu[(size_t)Y * C.GridW + X].Bg = PackRgb(38, 79, 120);
+                C.Gpu[(size_t)Y * C.GridW + X].Bg = PackHex(Theme.Selection);
                 C.Gpu[(size_t)Y * C.GridW + X].Flags &= ~GPU_SEE_THROUGH;
             }
         }
@@ -497,7 +579,7 @@ static void Tick(clodw& C)
     Consts.CellH = (u32)C.F.CellH;
     Consts.GridW = (u32)C.GridW;
     Consts.GridH = (u32)C.GridH;
-    Consts.MarginColor = DefaultBg;
+    Consts.MarginColor = PackHex(Theme.Bg);
     Consts.UnderlineY = (u32)C.F.UnderlineY;
     Consts.StrikeY = (u32)C.F.StrikeY;
     Consts.LineH = (u32)C.F.LineH;
@@ -645,6 +727,16 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                 C->Transparency = 100 - Opacity;
                 CheckOpacity(*C);
                 WriteSetting("opacity", std::to_string(Opacity));
+                C->Dirty = true;
+                return 0;
+            }
+            // Theme > Nord etc.: colors for the terminal and clod's bars; saved to settings.txt.
+            if(Cmd >= IDM_THEME && Cmd < IDM_THEME + ArrayCount(Themes) * 16)
+            {
+                C->Theme = (Cmd - IDM_THEME) / 16;
+                CheckTheme(*C);
+                ApplyTitleBar(*C);
+                WriteSetting("theme", Themes[C->Theme].Name);
                 C->Dirty = true;
                 return 0;
             }
@@ -880,6 +972,8 @@ static int WindowMain(s32 JumpToTab)
     C.CopyOnSelectOff = (ReadSetting("copy_on_select") == "off");
     s32 Opacity = atoi(ReadSetting("opacity").c_str());
     if(Opacity > 0) { C.Transparency = 100 - Clamp(Opacity, 20, 100); } // never so faint the window is lost
+    std::string ThemeName = ReadSetting("theme");
+    for(u32 I = 0; I < ArrayCount(Themes); ++I) { if(_stricmp(ThemeName.c_str(), Themes[I].Name) == 0) { C.Theme = I; } }
 
     // --- settings ---
     std::string Font = ReadSetting("font");
@@ -916,6 +1010,16 @@ static int WindowMain(s32 JumpToTab)
     }
     AppendMenuW(WindowMenu, MF_POPUP, (UINT_PTR)C.OpacityMenu, L"Opacity");
     CheckOpacity(C);
+    C.ThemeMenu = CreatePopupMenu();
+    for(u32 I = 0; I < ArrayCount(Themes); ++I)
+    {
+        wchar_t Label[64] = {};
+        MultiByteToWideChar(CP_UTF8, 0, Themes[I].Name, -1, Label, ArrayCount(Label));
+        AppendMenuW(C.ThemeMenu, MF_STRING, IDM_THEME + I * 16, Label);
+    }
+    AppendMenuW(WindowMenu, MF_POPUP, (UINT_PTR)C.ThemeMenu, L"Theme");
+    CheckTheme(C);
+    ApplyTitleBar(C);
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
 

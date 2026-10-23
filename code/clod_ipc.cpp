@@ -21,7 +21,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a client from another build is turned away
 // with a clear message instead of misreading the stream.
-#define CLOD_PROTOCOL_VERSION 4
+#define CLOD_PROTOCOL_VERSION 5
 
 struct msg_attach
 {

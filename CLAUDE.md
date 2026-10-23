@@ -72,6 +72,13 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
     20-100, missing = 100; new installs get 95 from the default `shell/settings.txt`): the swap chain goes through DirectComposition with premultiplied alpha
     (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background
     (`GPU_SEE_THROUGH`) and the margin are see-through; text, colored backgrounds and the bars stay solid.
+  - Themes (`Themes[]` in `clodw_main.cpp`; the window menu's Theme submenu, saved as `theme = <name>`;
+    missing or unknown = Clod): default fg/bg, the 16 colors, the selection, and clod's own screen
+    parts. Compose colors those by role (`Ui(UI_BAR)` etc., `COLOR_UI` in `clod_base.h`), never with
+    fixed palette/RGB values, so a theme recolors them; console clients get `UiDefault`. The title
+    bar follows the theme (dark/light, and on Windows 11 the bar's colors, via DWM). Dim text is
+    drawn halfway to the background, so it works on light themes. 256-color and RGB output from
+    programs isn't themed.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in
