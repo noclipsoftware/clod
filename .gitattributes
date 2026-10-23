@@ -1,1 +1,2 @@
 vendor/** -text
+tools/screenshot/meshkit/** -text
