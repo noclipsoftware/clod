@@ -218,8 +218,9 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   (clod's shutdown closes consoles; clink would otherwise save only on a clean exit).
 - A shell tab is named for what it runs: cmd titles itself `<path>\cmd.exe - <command>` for
   external programs (`RunningCommand` tidies it and ignores clod's own startup steps), and the
-  tab shows its current folder at the prompt (back to it as soon as the program exits). Shell
-  tab names start with `❯ ` (like claude's own `✳`), never the word "cmd".
+  tab shows its current folder at the prompt (back to it as soon as the program exits). A shell
+  tab at its prompt is named `❯ <folder>` (like claude's own `✳`); running a program it shows
+  just that program's name or title, no `❯`. Never the word "cmd".
 - The server finds claude by session file, not by how it was started: about once a second it walks
   each tab's process tree and reads `<ClaudeConfigDir>\sessions\<pid>.json` (`sessionId`, `cwd`;
   `procStart` is checked against the process creation time). So a `claude` typed in a shell, `-c`,

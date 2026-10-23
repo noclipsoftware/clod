@@ -1055,14 +1055,14 @@ static std::string TabName(const tab& Tab)
 {
     // A shell: cmd titles itself "<path>\cmd.exe - <command>" while a command runs, and just its exe
     // path at the prompt. Show the running command, else the folder it's in (it follows cd); a
-    // title some program set itself (title, vim) shows as is. All behind a prompt mark, the way
-    // claude's own titles start with its ✳.
+    // title some program set itself (title, vim) shows as is. Only the folder, at the prompt, gets the
+    // prompt mark (the way claude's own titles start with its ✳), so ❯ means "the shell is yours".
     if(Tab.SessionId.empty())
     {
         const char* Mark = "❯ "; // ❯
-        if(!Tab.Term.Title.empty() && ToLower(Tab.Term.Title).find("cmd.exe") == std::string::npos) { return Mark + Tab.Term.Title; }
+        if(!Tab.Term.Title.empty() && ToLower(Tab.Term.Title).find("cmd.exe") == std::string::npos) { return Tab.Term.Title; }
         std::string Running = RunningCommand(Tab.Term.Title);
-        if(!Running.empty()) { return Mark + Running; }
+        if(!Running.empty()) { return Running; }
         return Mark + (!Tab.Project.empty() ? Tab.Project : Tab.Cwd);
     }
     std::string Fallback = !Tab.Title.empty() ? Tab.Title : (!Tab.Project.empty() ? Tab.Project : "claude");
