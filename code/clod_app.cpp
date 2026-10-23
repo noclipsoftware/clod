@@ -1172,7 +1172,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         pane_rect PR = PaneRect(App, Pane);
         if(PR.Y != 1) { continue; }
         const tab* T = App.PaneTab[Pane];
-        std::string Name = T ? std::to_string(TabIndex(App, T)) + " " + TabName(*T) : std::string("Home");
+        std::string Name = T ? TabName(*T) : std::string("Home");
         s32 X0 = PR.X;
         s32 X = PutText(F, X0, 0, " " + TruncateText(Name, Max(PR.W - 3, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
         bar_hit Hit = {X0, X, Pane};
@@ -1580,7 +1580,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             pane_rect PR = PaneRect(App, Pane);
             if(PR.Y == 1) { continue; }
             const tab* T = App.PaneTab[Pane];
-            std::string Name = T ? std::to_string(TabIndex(App, T)) + " " + TabName(*T) : std::string("Home");
+            std::string Name = T ? TabName(*T) : std::string("Home");
             PutText(F, PR.X + 1, PR.Y - 1, " " + TruncateText(Name, Max(PR.W - 4, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
         }
     }
