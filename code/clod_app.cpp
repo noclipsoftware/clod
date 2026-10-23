@@ -36,6 +36,8 @@ struct tab
     u32 ViewH;
     u32 ViewFullW;                // the file's own size, for the caption
     u32 ViewFullH;
+    u32 ViewIndex;                // its place among its folder's images (arrows step through them)
+    u32 ViewCount;
     pty* Pty;
 };
 
@@ -132,12 +134,14 @@ enum command_kind
     CMD_DETACH,        // drop the attached window; tabs keep running
     CMD_OPEN_FOLDER,   // new session in typed path Cwd, if it is a folder (closes the prompt)
     CMD_COMPLETE_FOLDER, // complete the last folder name in App.PathInput
+    CMD_VIEW_STEP,     // Tab's image: show the one Step images on in its folder
 };
 
 struct app_command
 {
     s32 Kind;
     tab* Tab;
+    s32 Step;
     std::string Bytes;
     std::string SessionId;
     std::string Cwd;
@@ -789,7 +793,9 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
 
             if(!Target->ViewImage.empty())
             {
-                if(Press) { Target->ViewImage.clear(); Target->ViewPixels.clear(); } // a click closes the image
+                // The wheel steps through the folder's images; a click closes the image.
+                if(Wheel) { app_command V = {}; V.Kind = CMD_VIEW_STEP; V.Tab = Target; V.Step = (Button & 1) ? 1 : -1; Cmds.push_back(V); }
+                else if(Press) { Target->ViewImage.clear(); Target->ViewPixels.clear(); }
                 continue;
             }
             if(Target->Term.MouseMode && Target->ScrollOffset == 0 && !Target->Exited)
@@ -894,7 +900,31 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         // --- session tab ---
-        if(!Tab->ViewImage.empty()) { Tab->ViewImage.clear(); Tab->ViewPixels.clear(); continue; } // any key closes the image
+        if(!Tab->ViewImage.empty())
+        {
+            // --- an image is up: arrows, Space/Backspace, PgUp/PgDn, Home/End step through its
+            // folder's images; any other key closes it. None reaches the program ---
+            s32 Step = 0;
+            bool32 Space = (K.Kind == KEY_CHAR && K.Codepoint == ' ' && !K.Mods);
+            if(K.Kind == KEY_RIGHT || K.Kind == KEY_DOWN || K.Kind == KEY_PGDN || Space) { Step = 1; }
+            else if(K.Kind == KEY_LEFT || K.Kind == KEY_UP || K.Kind == KEY_PGUP || K.Kind == KEY_BACKSPACE) { Step = -1; }
+            else if(K.Kind == KEY_HOME) { Step = -(s32)Tab->ViewIndex; }
+            else if(K.Kind == KEY_END) { Step = (s32)Tab->ViewCount - 1 - (s32)Tab->ViewIndex; }
+            if(!Step && K.Kind != KEY_HOME && K.Kind != KEY_END)
+            {
+                Tab->ViewImage.clear();
+                Tab->ViewPixels.clear();
+            }
+            else if(Step)
+            {
+                app_command V = {};
+                V.Kind = CMD_VIEW_STEP;
+                V.Tab = Tab;
+                V.Step = Step;
+                Cmds.push_back(V);
+            }
+            continue;
+        }
         // A fullscreen child (alternate screen) keeps its own history, so it gets the keys instead.
         if(K.Mods == KMOD_SHIFT && (K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && !Tab->Term.AltActive)
         {
@@ -1252,7 +1282,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             FillRow(F, CY, Left, Right, Bar);
             s32 CX = PutText(F, Left + 1, CY, TruncateText(Name, Max(PW - 30, 8)), Style(Ui(UI_BRIGHT), Ui(UI_BAR), ATTR_BOLD), Right);
             CX = PutText(F, CX + 2, CY, Size, Bar, Right);
-            PutText(F, CX + 3, CY, "any key closes", BarDim, Right);
+            if(PaneTab->ViewCount > 1)
+            {
+                CX = PutText(F, CX + 3, CY, std::to_string(PaneTab->ViewIndex + 1) + "/" + std::to_string(PaneTab->ViewCount), Bar, Right);
+                CX = PutText(F, CX + 3, CY, "\xE2\x86\x90\xE2\x86\x92 next", BarDim, Right); // ←→
+            }
+            PutText(F, CX + 3, CY, "any other key closes", BarDim, Right);
             continue;
         }
 

@@ -5,7 +5,7 @@
 //   clod --test      a throwaway instance for trying a new build next to the running clod: its own
 //                    server with no tray and no saved tabs, which ends when this window closes
 //   clod --server    the background server itself; started by the first client
-//   clod view FILE   in a clod tab: show an image over the tab (any key closes it)
+//   clod view PATH   in a clod tab: show an image (or a folder's images, arrows step) over the tab
 //
 // Unity build: this file includes everything else.
 
@@ -19,6 +19,7 @@
 #include <tlhelp32.h>
 #include <winternl.h>
 #include <wincodec.h>
+#include <shlwapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>
@@ -37,14 +38,15 @@
 
 int wmain(int Argc, wchar_t** Argv)
 {
-    // --- clod view <file>: run in a clod tab, shows an image over it. Writes OSC 7777 to its console,
-    // which ConPTY hands to the server like any output; the server reads the file ---
+    // --- clod view <file or folder>: run in a clod tab, shows an image (a folder: its first) over it.
+    // Writes OSC 7777 to its console, which ConPTY hands to the server like any output; the server
+    // reads the file ---
     if(Argc >= 2 && wcscmp(Argv[1], L"view") == 0)
     {
-        if(Argc < 3) { fwprintf(stderr, L"usage: clod view <image file>\n"); return 1; }
+        if(Argc < 3) { fwprintf(stderr, L"usage: clod view <image file or folder>\n"); return 1; }
         wchar_t Full[4096] = {};
         DWORD Attr = GetFullPathNameW(Argv[2], ArrayCount(Full), Full, 0) ? GetFileAttributesW(Full) : INVALID_FILE_ATTRIBUTES;
-        if(Attr == INVALID_FILE_ATTRIBUTES || (Attr & FILE_ATTRIBUTE_DIRECTORY)) { fwprintf(stderr, L"clod view: no such file: %s\n", Argv[2]); return 1; }
+        if(Attr == INVALID_FILE_ATTRIBUTES) { fwprintf(stderr, L"clod view: no such file or folder: %s\n", Argv[2]); return 1; }
         if(!GetEnvironmentVariableW(L"CLOD_DIR", 0, 0)) { fwprintf(stderr, L"clod view: shows images only in a clod tab\n"); return 1; }
         std::wstring Seq = std::wstring(L"\x1b]7777;view;") + Full + L"\x07";
         DWORD Written = 0;

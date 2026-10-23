@@ -321,6 +321,74 @@ static u32 LoadPrefixKey()
     return Key >= 0 ? (u32)Key : 0x1C;
 }
 
+// Shows an image over tab T (`clod view`): Path itself, or when Path is a folder its first image;
+// then Step images on through that folder, in Explorer's order, wrapping, skipping files Windows
+// can't read. Sets the tab's view (and its place among the folder's images); on failure says why
+// in the command bar and leaves the view as it was.
+static void ViewImageAt(app_state& App, tab& T, const std::string& Path, s32 Step, u64 NowMs)
+{
+    std::wstring P = Utf8ToWide(Path);
+    while(P.size() > 3 && (P.back() == L'\\' || P.back() == L'/')) { P.pop_back(); }
+    DWORD Attr = GetFileAttributesW(P.c_str());
+    bool32 Folder = (Attr != INVALID_FILE_ATTRIBUTES) && (Attr & FILE_ATTRIBUTE_DIRECTORY);
+    std::wstring Dir = Folder ? P : P.substr(0, P.find_last_of(L"\\/"));
+    std::wstring Name = Folder ? std::wstring() : P.substr(P.find_last_of(L"\\/") + 1);
+
+    // --- the folder's images by extension, sorted the way Explorer sorts names ---
+    static const wchar_t* Exts[] = {L".png", L".jpg", L".jpeg", L".jpe", L".jfif", L".gif", L".bmp", L".dib", L".tif", L".tiff",
+                                    L".ico", L".webp", L".heic", L".heif", L".avif", L".jxr", L".wdp", L".dds"};
+    std::vector<std::wstring> Names;
+    WIN32_FIND_DATAW Found = {};
+    HANDLE Find = FindFirstFileW((Dir + L"\\*").c_str(), &Found);
+    for(bool32 More = Find != INVALID_HANDLE_VALUE; More; More = FindNextFileW(Find, &Found))
+    {
+        if(Found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { continue; }
+        const wchar_t* Dot = wcsrchr(Found.cFileName, L'.');
+        bool32 Image = false;
+        for(const wchar_t* E : Exts) { if(Dot && _wcsicmp(Dot, E) == 0) { Image = true; } }
+        if(Image) { Names.push_back(Found.cFileName); }
+    }
+    if(Find != INVALID_HANDLE_VALUE) { FindClose(Find); }
+    std::sort(Names.begin(), Names.end(), [](const std::wstring& A, const std::wstring& B) { return StrCmpLogicalW(A.c_str(), B.c_str()) < 0; });
+    s32 At = 0;
+    if(!Folder)
+    {
+        // The file itself, even with an extension not on the list (WIC may still read it).
+        At = -1;
+        for(s32 I = 0; I < (s32)Names.size(); ++I) { if(_wcsicmp(Names[I].c_str(), Name.c_str()) == 0) { At = I; } }
+        if(At < 0) { Names.insert(Names.begin(), Name); At = 0; }
+    }
+    if(Names.empty())
+    {
+        App.Status = "No images in " + WideToUtf8(Dir);
+        App.StatusUntil = NowMs + 5000;
+        return;
+    }
+
+    // --- decode: the one Step away, or the next readable one past it in the same direction ---
+    s32 Count = (s32)Names.size();
+    s32 Dirn = (Step < 0) ? -1 : 1;
+    for(s32 Tries = 0; Tries < Count; ++Tries)
+    {
+        s32 Index = (((At + Step + Dirn * Tries) % Count) + Count) % Count;
+        std::wstring File = Dir + L"\\" + Names[Index];
+        std::vector<u32> Pixels;
+        u32 W = 0, H = 0, FullW = 0, FullH = 0;
+        if(!DecodeImage(File, 640, 400, Pixels, &W, &H, &FullW, &FullH)) { continue; }
+        T.ViewImage = WideToUtf8(File);
+        T.ViewPixels.swap(Pixels);
+        T.ViewW = W;
+        T.ViewH = H;
+        T.ViewFullW = FullW;
+        T.ViewFullH = FullH;
+        T.ViewIndex = (u32)Index;
+        T.ViewCount = (u32)Count;
+        return;
+    }
+    App.Status = Folder || Count > 1 ? "No image Windows can read in " + WideToUtf8(Dir) : "Can't show " + WideToUtf8(Name) + ": not an image Windows can read";
+    App.StatusUntil = NowMs + 5000;
+}
+
 // A frame for a client that draws cells itself (clodw): the rows that differ from Prev, or all of
 // them when Full, plus cursor, title and the mouse reporting it should do. Returns false when there
 // is nothing to send.
@@ -905,6 +973,7 @@ static int ServerMain()
                     StartTab(*C.Tab, Max(C.Tab->Term.Cols, 1), Max(C.Tab->Term.Rows, 1), Job, Wake, App, NowMs);
                 } break;
                 case CMD_CLOSE: CloseTab(App, C.Tab); break;
+                case CMD_VIEW_STEP: if(!C.Tab->ViewImage.empty()) { ViewImageAt(App, *C.Tab, C.Tab->ViewImage, C.Step, NowMs); } break;
                 case CMD_RESCAN:
                 {
                     App.Sessions = ScanSessions();
@@ -952,19 +1021,11 @@ static int ServerMain()
                 ToClient += T->Term.PassThrough;
                 T->Term.PassThrough.clear();
                 TabSyncScroll(*T);
-                // --- `clod view <file>` ran in this tab: decode a small copy for the half-block preview
-                // (clodw decodes its own); the image covers the tab until a key or click ---
+                // --- `clod view <file or folder>` ran in this tab: the image covers the tab until a key
+                // or click; arrows step through the folder's images (CMD_VIEW_STEP) ---
                 if(!T->Term.View.empty())
                 {
-                    if(DecodeImage(Utf8ToWide(T->Term.View), 640, 400, T->ViewPixels, &T->ViewW, &T->ViewH, &T->ViewFullW, &T->ViewFullH))
-                    {
-                        T->ViewImage = T->Term.View;
-                    }
-                    else
-                    {
-                        App.Status = "Can't show " + T->Term.View.substr(T->Term.View.find_last_of("\\/") + 1) + ": not an image Windows can read";
-                        App.StatusUntil = NowMs + 5000;
-                    }
+                    ViewImageAt(App, *T, T->Term.View, 0, NowMs);
                     T->Term.View.clear();
                 }
                 // --- new output off screen (the home screen says so): only when it added lines or moved

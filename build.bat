@@ -46,7 +46,7 @@ del /q clod.old-*.exe >nul 2>nul
 if exist clod.exe del /q clod.exe >nul 2>nul
 if exist clod.exe move /y clod.exe clod.old-%RANDOM%.exe >nul
 
-cl %FLAGS% %OPT% "%ROOT%code\clod.cpp" clod.res /Fe:clod.exe /link /INCREMENTAL:NO /OPT:REF /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib ole32.lib windowscodecs.lib
+cl %FLAGS% %OPT% "%ROOT%code\clod.cpp" clod.res /Fe:clod.exe /link /INCREMENTAL:NO /OPT:REF /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib ole32.lib windowscodecs.lib shlwapi.lib
 set ERR=%errorlevel%
 if not "%ERR%"=="0" goto :done
 

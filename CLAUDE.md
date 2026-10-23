@@ -84,6 +84,10 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   OSC 9, the emulator keeps it in `vt_terminal::View`, and the server decodes the file
   (`DecodeImage` in `clod_image.cpp`, Windows Imaging Component) into `tab::ViewImage`. The image
   covers the tab's pane above a caption row until a key or click (not passed to the program).
+  A folder shows its first image; arrows, Space/Backspace, PgUp/PgDn, Home/End and the wheel step
+  through the folder's images (`CMD_VIEW_STEP` -> `ViewImageAt`: listed by extension, sorted like
+  Explorer with `StrCmpLogicalW`, wrapping, unreadable ones skipped); viewing a file steps through
+  its folder too.
   clodw draws the real image: `MSG_CELLS` names the pane and path, clodw decodes its own copy into
   a mipmapped texture and the pixel shader draws it inside `ImageRect` (fitted, never above its own
   size at the window's DPI). Console clients get half blocks (`▀`/`▄`, two pixels a cell) from
