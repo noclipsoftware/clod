@@ -1,4 +1,4 @@
-# Captures build\clodw.exe for the landing page (kevin.gd/clod) as a PNG with real alpha, into
+# Captures build\clodw.exe for the landing page (noclip.gd/clod) as a PNG with real alpha, into
 # content\ (`build content` runs it for both scenes). The window is shot over pure
 # black and over pure white, and the difference gives each pixel's opacity (difference matting).
 # See-through cells come out at clod's opacity setting, and the title bar, rounded corners and

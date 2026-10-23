@@ -1,9 +1,9 @@
 ---
 name: update-website
-description: Refresh clod's landing page at kevin.gd/clod after working on clod - update the website text in CLAUDE.md, run `build content` (fresh build, both screenshots, text, icon into content\), rebuild the site, preview it, and (only with the user's go-ahead) deploy it. Use for "update the website", "push a website update", "new screenshots for the landing page", "refresh kevin.gd/clod", or when a capture in tools\screenshot breaks.
+description: Refresh clod's landing page at noclip.gd/clod after working on clod - update the website text in CLAUDE.md, run `build content` (fresh build, both screenshots, text, icon into content\), rebuild the site, preview it, and (only with the user's go-ahead) deploy it. Use for "update the website", "push a website update", "new screenshots for the landing page", "refresh noclip.gd/clod", or when a capture in tools\screenshot breaks.
 ---
 
-# Update clod's landing page (kevin.gd/clod)
+# Update clod's landing page (noclip.gd/clod)
 
 clod makes the content; the site only lays it out:
 

@@ -11,7 +11,7 @@ Each tab is a real `cmd.exe` (running the repo's `shell\init.bat`, with clink) i
 claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites what the panes show between a top bar and a command bar (bottom row), tmux-style.
 It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, Git Bash in WT).
 
-## Website content (kevin.gd/clod)
+## Website content (noclip.gd/clod)
 
 `build content` builds clod, then writes the landing page's content to `content\`: both
 screenshots (`tools\screenshot\capture.py`, from the fresh `build\clodw.exe`), the icon, and
