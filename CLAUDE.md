@@ -11,6 +11,29 @@ Each tab is a real `cmd.exe` (running the repo's `shell\init.bat`, with clink) i
 claude tab while `claude.exe` runs inside that cmd. clod emulates each tab's screen and composites what the panes show between a top bar and a command bar (bottom row), tmux-style.
 It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, Git Bash in WT).
 
+## Website content (kevin.gd/clod)
+
+`build content` builds clod, then writes the landing page's content to `content\`: both
+screenshots (`tools\screenshot\capture.py`, from the fresh `build\clodw.exe`), the icon, and
+`content.json` with the header text and features below (`tools\content.py`). The site generator
+(`C:\UnitySrc\kevin.gd\build.py`) copies that folder into the page. The page should feel zen:
+quiet, short, nothing loud.
+
+Tagline: clod is a terminal host for Windows
+Install: winget install clod
+
+Main features, in order. Short phrases, no descriptions, only what's special about clod:
+
+- split panes
+- tabs survive restarts and reboots
+- tabs keep running in the background
+- Claude Code session manager
+- tab completion
+- autosuggestions
+- unix tools from Git for Windows
+- built-in image preview
+- ~1 ms from key to screen
+
 ## Process architecture
 
 - `clod --server` (hidden, no console) owns everything: ConPTY children, `vt_terminal` emulators,

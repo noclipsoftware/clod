@@ -3,6 +3,7 @@ setlocal
 rem Unity build of clod with MSVC. Run from any shell; sets up the VS environment if needed.
 rem   build          optimized
 rem   build debug    unoptimized, debug CRT
+rem   build content  optimized, then the website's content\ (screenshots, text, icon); see CLAUDE.md
 
 where cl >nul 2>nul
 if not errorlevel 1 goto :build
@@ -55,6 +56,17 @@ del /q clodw.old-*.exe >nul 2>nul
 if exist clodw.exe del /q clodw.exe >nul 2>nul
 if exist clodw.exe move /y clodw.exe clodw.old-%RANDOM%.exe >nul
 cl %FLAGS% %OPT% "%ROOT%code\clodw.cpp" clod.res /Fe:clodw.exe /link /INCREMENTAL:NO /OPT:REF /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\clod.manifest" kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib d3d11.lib dxgi.lib d3dcompiler.lib d2d1.lib dwrite.lib dcomp.lib dwmapi.lib comdlg32.lib imm32.lib ole32.lib windowscodecs.lib
+set ERR=%errorlevel%
+if not "%ERR%"=="0" goto :done
+if not "%1"=="content" goto :done
+
+rem --- build content: the landing page's screenshots of this build, its text and the icon, into ---
+rem --- content\ for kevin.gd's site generator. The captures pop up a clodw window: don't type meanwhile. ---
+python "%ROOT%tools\screenshot\capture.py"
+if errorlevel 1 (set ERR=1& goto :done)
+python "%ROOT%tools\screenshot\capture.py" --scene shell
+if errorlevel 1 (set ERR=1& goto :done)
+python "%ROOT%tools\content.py"
 set ERR=%errorlevel%
 
 :done
