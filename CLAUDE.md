@@ -118,7 +118,9 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   doing, folder; `x` closes the selected one), then keys for new ones, then the Claude Code
   sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
   shows it. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
-  `tab::Notice`, shown there and counted in the top bar until a pane shows it.
+  `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
+  means output off screen that added lines or moved the cursor to another row: clink redrawing
+  its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
 - Changing layout keeps the focused tab on screen and fills new panes with tabs nothing shows
   (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
 - Each visible tab's terminal and ConPTY are sized to its pane; off-screen tabs take the focused

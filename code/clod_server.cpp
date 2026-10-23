@@ -946,7 +946,15 @@ static int ServerMain()
                 ToClient += T->Term.PassThrough;
                 T->Term.PassThrough.clear();
                 TabSyncScroll(*T);
-                if(PaneShowing(App, T) < 0) { T->Activity = true; } // off screen: the home screen says so
+                // --- new output off screen (the home screen says so): only when it added lines or moved
+                // the cursor to another row since the tab was last seen; clink redrawing its prompt in
+                // place (git status arriving) or ConPTY repainting after a resize doesn't count ---
+                if(PaneShowing(App, T) >= 0 || NowMs < T->RepaintUntilMs)
+                {
+                    T->SeenLinesPushed = T->Term.ScrollbackPushed;
+                    T->SeenCursorY = T->Term.CursorY;
+                }
+                else if(T->Term.ScrollbackPushed != T->SeenLinesPushed || T->Term.CursorY != T->SeenCursorY) { T->Activity = true; }
                 if(T == ActiveTab(App) && T->Term.SyncOutput && !WasSync) { SyncSinceMs = NowMs; }
                 Dirty = true;
 
@@ -1070,6 +1078,9 @@ static int ServerMain()
                 pane_rect R = (Pane >= 0) ? PaneRect(App, Pane) : FocusRect;
                 if(T->Term.Cols == R.W && T->Term.Rows == R.H) { continue; }
                 VtResize(T->Term, R.W, R.H);
+                T->SeenLinesPushed = T->Term.ScrollbackPushed;
+                T->SeenCursorY = T->Term.CursorY;
+                T->RepaintUntilMs = NowMs + 500;
                 if(T->Pty)
                 {
                     COORD Size = {(SHORT)R.W, (SHORT)R.H};

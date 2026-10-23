@@ -18,7 +18,10 @@ struct tab
     std::string Title;      // from the session file; used when the child sets no title
     s32 ScrollOffset;       // lines scrolled back from live output; 0 = following
     u64 SeenPushed;         // Term.ScrollbackPushed as of the last scroll fix-up
-    bool32 Activity;        // output arrived while no pane showed it
+    bool32 Activity;        // new lines arrived while no pane showed it
+    u64 SeenLinesPushed;    // Term.ScrollbackPushed and CursorY as last seen on screen (or just after a
+    s32 SeenCursorY;        // resize): output that moves neither, like a prompt redrawn in place, isn't new
+    u64 RepaintUntilMs;     // ConPTY's repaint after a resize is expected until then, and isn't new either
     std::string Notice;     // why it wants a look ("finished", "needs you", ...), set while no pane showed it
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
