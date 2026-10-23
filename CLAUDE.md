@@ -219,7 +219,7 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   (`tab::TitleBusy`) or some shell tab is running a program (its cmd has a child process).
   An idle shell at its prompt or an idle claude doesn't count.
 - In the clod window, `q` (home screen) only **detaches**. Stop and end-all are
-  not reachable from the window UI. A tab is dropped only by closing it (prefix `x`) or by `exit`
+  not reachable from the window UI. A tab is dropped only by closing it (`x` on the home screen) or by `exit`
   in its cmd. Claude exiting returns the tab to its shell.
 - The command prefix is `Ctrl+\` by default (`prefix = ctrl+...` in `~\.clod\settings.txt`, read on
   server start and each attach; `PrefixFromName`/`PrefixName` in `clod_app.cpp`). It toggles
