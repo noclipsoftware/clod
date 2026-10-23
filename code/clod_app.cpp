@@ -105,7 +105,7 @@ struct app_state
     s32 ListScroll;
 
     u32 PrefixKey;      // the control byte that starts a clod command (settings "prefix"; server default Ctrl+\)
-    bool32 PrefixArmed;
+    tab* CameFrom;      // the tab the focused pane showed before the prefix brought it home: Esc goes back
     s32 Prompt;
     tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
     std::string PathInput;
@@ -252,16 +252,18 @@ static void SwitchTab(app_state& App, s32 Index)
     if(T) { T->Activity = false; T->Notice.clear(); }
 }
 
-// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes show (the home
-// screen, 0, is always a stop): cycling never pulls a tab out of another pane or moves the focus.
+// Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes show and the home
+// screen (the prefix goes there): cycling never pulls a tab out of another pane or moves the focus.
 static void CycleTab(app_state& App, s32 Step)
 {
-    s32 Count = (s32)App.Tabs.size() + 1;
-    for(s32 I = 1; I < Count; ++I)
+    s32 Count = (s32)App.Tabs.size();
+    if(Count == 0) { return; }
+    s32 From = Max(App.Active, 1) - 1 + (App.Active == 0 && Step > 0 ? -1 : 0); // from home: the first or last tab
+    for(s32 I = 1; I <= Count; ++I)
     {
-        s32 Index = ((App.Active + Step * I) % Count + Count) % Count;
-        s32 Shown = (Index > 0) ? PaneShowing(App, App.Tabs[Index - 1]) : -1;
-        if(Shown < 0 || Shown == App.Focus) { SwitchTab(App, Index); return; }
+        s32 Index = ((From + Step * I) % Count + Count) % Count;
+        s32 Shown = PaneShowing(App, App.Tabs[Index]);
+        if(Shown < 0 || Shown == App.Focus) { SwitchTab(App, Index + 1); return; }
     }
 }
 
@@ -291,6 +293,7 @@ static void SetLayout(app_state& App, s32 Layout)
 static void ForgetTab(app_state& App, const tab* T)
 {
     if(App.PromptTab == T) { App.PromptTab = 0; App.Prompt = PROMPT_NONE; }
+    if(App.CameFrom == T) { App.CameFrom = 0; }
     s32 From = TabIndex(App, T); // the position just after T
     for(s32 P = 0; P < MAX_PANES; ++P)
     {
@@ -430,6 +433,12 @@ static void OpenFolderPrompt(app_state& App, const std::string& Base)
     if(!Base.empty() && Base.back() != '\\' && Base.back() != '/') { App.PathInput += '\\'; }
 }
 
+// Where the home screen starts new tabs: the folder of the tab it was opened from, else the window's.
+static std::string HomeCwd(const app_state& App)
+{
+    return App.CameFrom ? App.CameFrom->Cwd : App.LaunchCwd;
+}
+
 // --- input tokens ---
 
 enum key_kind
@@ -453,6 +462,7 @@ enum key_kind
     KEY_MOUSE,
     KEY_PASTE_BEGIN,
     KEY_FOCUS,
+    KEY_GO_HOME,      // CSI 7777 ~: clodw's shortcuts, "home screen in this pane" (never back out of it)
     KEY_OTHER,
 };
 
@@ -525,6 +535,7 @@ static input_token NextToken(const std::string& S, size_t At)
                     case 5: K.Kind = KEY_PGUP; break;
                     case 6: K.Kind = KEY_PGDN; break;
                     case 200: K.Kind = KEY_PASTE_BEGIN; break;
+                    case 7777: K.Kind = KEY_GO_HOME; break;
                 }
             }
             else if(Final == 'A') { K.Kind = KEY_UP; }
@@ -636,58 +647,6 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
 
         tab* Tab = ActiveTab(App);
 
-        // --- second key after the prefix ---
-        if(App.PrefixArmed)
-        {
-            if(K.Kind == KEY_MOUSE) { continue; }
-            App.PrefixArmed = false;
-            u32 C = (K.Kind == KEY_CHAR) ? K.Codepoint : 0;
-            if(C >= '0' && C <= '9') { SwitchTab(App, (s32)(C - '0')); }
-            else if(C == 'n' || C == ']') { CycleTab(App, 1); }
-            else if(C == 'p' || C == '[') { CycleTab(App, -1); }
-            else if(C == 'z') { SetLayout(App, LAYOUT_SINGLE); }
-            else if(C == 'v') { SetLayout(App, LAYOUT_SIDE); }
-            else if(C == 'g') { SetLayout(App, LAYOUT_GRID); }
-            else if(C == 'b') { SetLayout(App, LAYOUT_MAIN); }
-            else if(K.Kind == KEY_LEFT || K.Kind == KEY_RIGHT || K.Kind == KEY_UP || K.Kind == KEY_DOWN)
-            {
-                // --- focus the nearest pane in that direction ---
-                s32 Dx = (K.Kind == KEY_RIGHT) - (K.Kind == KEY_LEFT);
-                s32 Dy = (K.Kind == KEY_DOWN) - (K.Kind == KEY_UP);
-                pane_rect From = PaneRect(App, App.Focus);
-                s32 Fx = From.X + From.W / 2;
-                s32 Fy = From.Y + From.H / 2;
-                s32 Best = -1;
-                s32 BestDist = 1 << 30;
-                for(s32 P = 0; P < PaneCount(App.Layout); ++P)
-                {
-                    pane_rect R = PaneRect(App, P);
-                    s32 Px = R.X + R.W / 2;
-                    s32 Py = R.Y + R.H / 2;
-                    bool32 Ahead = (Dx > 0 && R.X >= From.X + From.W) || (Dx < 0 && R.X + R.W <= From.X) ||
-                                   (Dy > 0 && R.Y >= From.Y + From.H) || (Dy < 0 && R.Y + R.H <= From.Y);
-                    s32 Dist = (Px - Fx) * (Px - Fx) + (Py - Fy) * (Py - Fy);
-                    if(P != App.Focus && Ahead && Dist < BestDist) { Best = P; BestDist = Dist; }
-                }
-                if(Best >= 0) { FocusPane(App, Best); }
-            }
-            else if(C == 's' || C == 'h') { SwitchTab(App, 0); }
-            else if(C == 'c') { NewSession(Cmds, Tab ? Tab->Cwd : App.LaunchCwd); }
-            else if(C == 'o') { OpenFolderPrompt(App, Tab ? Tab->Cwd : App.LaunchCwd); }
-            else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = Tab ? Tab->Cwd : App.LaunchCwd; Cmds.push_back(S); }
-            else if(C == 'x' && Tab) { App.Prompt = PROMPT_CLOSE_TAB; App.PromptTab = Tab; }
-            else if(C == 'r' && Tab) { app_command R = {}; R.Kind = CMD_RESTART; R.Tab = Tab; Cmds.push_back(R); }
-            else if(C == 'q' || C == 'd') { app_command D = {}; D.Kind = CMD_DETACH; Cmds.push_back(D); }
-            else if(C == 'm')
-            {
-                App.MouseCaptureOff = !App.MouseCaptureOff;
-                App.Status = App.MouseCaptureOff ? "Mouse capture off: terminal selection works, wheel scrolling off" : "Mouse capture on";
-                App.StatusUntil = NowMs + 3000;
-            }
-            else if(K.Kind == KEY_CHAR && K.Codepoint == App.PrefixKey && Tab && !Tab->Exited) { WriteToTab(Cmds, Tab, Raw); } // twice: the key itself
-            continue;
-        }
-
         // --- folder prompt: edit the path for a new session ---
         if(App.Prompt == PROMPT_NEW_FOLDER)
         {
@@ -732,7 +691,23 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         // --- global keys ---
-        if(K.Kind == KEY_CHAR && K.Codepoint == App.PrefixKey && K.Mods == KMOD_CTRL) { App.PrefixArmed = true; continue; }
+        // The prefix: a tab's pane goes to the home screen, with that tab selected and remembered, so
+        // Enter, Esc or the prefix again go straight back; on the home screen it goes back. clodw's
+        // shortcuts send KEY_GO_HOME instead, which only ever goes home.
+        bool32 GoHome = (K.Kind == KEY_GO_HOME);
+        if(GoHome || (K.Kind == KEY_CHAR && K.Codepoint == App.PrefixKey && K.Mods == KMOD_CTRL))
+        {
+            if(Tab)
+            {
+                App.CameFrom = Tab;
+                App.Selected = TabIndex(App, Tab) - 1;
+                App.Filter.clear();
+                App.FilterEditing = false;
+                SwitchTab(App, 0);
+            }
+            else if(!GoHome && App.CameFrom) { SwitchTab(App, TabIndex(App, App.CameFrom)); }
+            continue;
+        }
         // Alt+Q / Alt+Shift+Q: focus the next / previous pane.
         if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && (K.Codepoint == 'q' || K.Codepoint == 'Q'))
         {
@@ -861,12 +836,20 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 App.Selected = Running;
                 App.ListScroll = 0;
             }
+            else if(K.Kind == KEY_ESC && !App.FilterEditing && App.Filter.empty() && App.CameFrom) { SwitchTab(App, TabIndex(App, App.CameFrom)); }
             else if(K.Kind == KEY_ESC)
             {
                 App.Filter.clear();
                 App.FilterEditing = false;
                 App.Selected = 0;
                 App.ListScroll = 0;
+            }
+            else if(K.Kind == KEY_TAB || K.Kind == KEY_LEFT || K.Kind == KEY_RIGHT)
+            {
+                // Another pane gets the focus (and the keys: a program there takes them).
+                s32 Count = PaneCount(App.Layout);
+                bool32 Back = (K.Kind == KEY_LEFT) || (K.Kind == KEY_TAB && K.Mods == KMOD_SHIFT);
+                FocusPane(App, (App.Focus + (Back ? Count - 1 : 1)) % Count);
             }
             else if(K.Kind == KEY_UP) { HomeMoveSelection(App, -1); }
             else if(K.Kind == KEY_DOWN) { HomeMoveSelection(App, 1); }
@@ -881,11 +864,21 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 if(C == '/') { App.FilterEditing = true; }
                 else if(C == 'k') { HomeMoveSelection(App, -1); }
                 else if(C == 'j') { HomeMoveSelection(App, 1); }
-                else if(C == 'g') { HomeMoveSelection(App, -1000000); }
-                else if(C == 'G') { HomeMoveSelection(App, 1000000); }
-                else if(C == 'n') { NewSession(Cmds, App.LaunchCwd); }
-                else if(C == 'o') { OpenFolderPrompt(App, App.LaunchCwd); }
-                else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = App.LaunchCwd; Cmds.push_back(S); }
+                else if(C >= '1' && C <= '9') { SwitchTab(App, (s32)(C - '0')); }
+                else if(C == 'z') { SetLayout(App, LAYOUT_SINGLE); }
+                else if(C == 'v') { SetLayout(App, LAYOUT_SIDE); }
+                else if(C == 'g') { SetLayout(App, LAYOUT_GRID); }
+                else if(C == 'b') { SetLayout(App, LAYOUT_MAIN); }
+                else if(C == 'n') { NewSession(Cmds, HomeCwd(App)); }
+                else if(C == 'o') { OpenFolderPrompt(App, HomeCwd(App)); }
+                else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = HomeCwd(App); Cmds.push_back(S); }
+                else if(C == 'R' && SelectedTab) { app_command Re = {}; Re.Kind = CMD_RESTART; Re.Tab = SelectedTab; Cmds.push_back(Re); }
+                else if(C == 'm')
+                {
+                    App.MouseCaptureOff = !App.MouseCaptureOff;
+                    App.Status = App.MouseCaptureOff ? "Mouse capture off: terminal selection works, wheel scrolling off" : "Mouse capture on";
+                    App.StatusUntil = NowMs + 3000;
+                }
                 else if(C == 'N')
                 {
                     // In the selected tab's or session's folder.
@@ -1104,15 +1097,14 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     }
 
     // --- command bar (bottom row) ---
-    // Normally: prefix commands in a tab, page keys on the home screen, plus status or scroll
-    // position on the right. Turns orange while the prefix waits for its second key or a y/n is asked.
+    // On the home screen its keys; in a tab only how to get home. Status or scroll position on the
+    // right. In the accent while a y/n or the folder prompt is up.
     if(H >= 2)
     {
         s32 Y = H - 1;
         bool32 Asking = (App.Prompt == PROMPT_CLOSE_TAB);
         bool32 Folder = (App.Prompt == PROMPT_NEW_FOLDER);
-        bool32 Armed = App.PrefixArmed;
-        bool32 Orange = Asking || Armed || Folder;
+        bool32 Orange = Asking || Folder;
         cell CmdBar = Orange ? Style(Ui(UI_ON_ACCENT), Ui(UI_ACCENT), 0) : Bar;
         cell KeyStyle = Style(Ui(Orange ? UI_ON_ACCENT : UI_BRIGHT), CmdBar.Bg, ATTR_BOLD);
         cell LabelStyle = Style(Ui(Orange ? UI_ON_ACCENT_DIM : UI_DIM), CmdBar.Bg, 0);
@@ -1154,25 +1146,18 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         }
         else
         {
-            static const char* PrefixKeys[] = {
-                "h", "home", "0-9", "show", "n/p", "next/prev", "c", "new", "o", "folder", "t", "shell", "x", "close",
-                "z/v/g/b", "layout", "arrows", "pane", "r", "restart", "m", "mouse", "q", "detach",
-            };
             static const char* HomeKeys[] = {
-                "Enter", "show here", "\xE2\x86\x91\xE2\x86\x93", "select", "/", "filter", "x", "close",
-                "r", "rescan", "q", "detach",
+                "Enter", "show here", "1-9", "show N", "\xE2\x86\x90\xE2\x86\x92", "pane", "x", "close", "R", "restart",
+                "z/v/g/b", "layout", "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
             };
             const char** Keys = HomeKeys;
-            s32 KeyCount = (s32)ArrayCount(HomeKeys);
-            if(Armed) { Keys = PrefixKeys; KeyCount = (s32)ArrayCount(PrefixKeys); }
-            else if(Active) { KeyCount = 0; } // in a tab the left stays empty; the prefix hint sits on the right
+            s32 KeyCount = Active ? 0 : (s32)ArrayCount(HomeKeys); // in a tab the left stays empty
 
             // --- right side: a status message or scroll position outranks the key hints ---
             std::string Right;
             cell RightStyle = LabelStyle;
             bool32 Important = false;
-            if(Armed) { Right = "Esc cancel"; }
-            else if(!App.Status.empty() && NowMs < App.StatusUntil)
+            if(!App.Status.empty() && NowMs < App.StatusUntil)
             {
                 Right = App.Status;
                 RightStyle = Style(Ui(UI_NOTE), CmdBar.Bg, ATTR_BOLD);
@@ -1184,13 +1169,13 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 RightStyle = KeyStyle;
                 Important = true;
             }
-            else { Right = PrefixName(App.PrefixKey) + " commands"; }
+            else if(Active) { Right = PrefixName(App.PrefixKey) + " home"; }
+            else if(App.CameFrom) { Right = "Esc back"; }
             Right = TruncateText(Right, Max(W - 3, 0));
             s32 RightX = W - TextWidth(Right) - 2; // the last two cells stay free: clodw draws its keep-active light there
             s32 KeysEnd = Important ? Max(RightX - 2, 0) : W;
 
             s32 BX = 1;
-            if(Armed) { BX = PutText(F, BX, Y, PrefixName(App.PrefixKey) + " \xE2\x96\xB8", KeyStyle, KeysEnd) + 2; } // ▸
             // Whole entries only: the first one that doesn't fit ends the list.
             s32 ListEnd = (Right.empty() || Important) ? KeysEnd : RightX - 2;
             for(s32 I = 0; I + 1 < KeyCount; I += 2)
@@ -1322,6 +1307,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
 
         // --- home screen: the running tabs, keys for new ones, then the Claude Code sessions ---
         s32 Running = (s32)App.Tabs.size();
+        s32 Bottom = Top + PR.H; // rows below belong to other panes or the command bar
         cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
         s32 RX = PutText(F, Left + 1, Top, "Running", Style(0, 0, ATTR_BOLD), Right);
         PutText(F, RX + 2, Top, std::to_string(Running), Dim, Right);
@@ -1334,6 +1320,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             const tab* T = App.Tabs[I];
             s32 Y = Top + 1 + I;
+            if(Y >= Bottom) { break; }
             bool32 Sel = Focused && App.Selected == I; // other panes' home screens show no selection
             cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
@@ -1361,7 +1348,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
             s32 KX = Left + 5;
             s32 KY = Top + 1 + Max(Running, 1);
-            for(u32 I = 0; I + 1 < ArrayCount(NewKeys); I += 2)
+            for(u32 I = 0; I + 1 < ArrayCount(NewKeys) && KY < Bottom; I += 2)
             {
                 if(KX + TextWidth(NewKeys[I]) + 1 + TextWidth(NewKeys[I + 1]) > Right) { break; }
                 KX = PutText(F, KX, KY, NewKeys[I], KeyText, Right);
@@ -1370,10 +1357,11 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         }
 
         s32 ST = Top + HomeSessionsRow(App);
+        if(ST + 3 > Bottom) { continue; } // no room for the sessions list
         std::vector<s32> Filtered = FilterSessions(App);
         s32 HX = PutText(F, Left + 1, ST, "Claude Code sessions", Style(0, 0, ATTR_BOLD), Right);
         PutText(F, HX + 2, ST, std::to_string(Filtered.size()) + (App.Filter.empty() ? "" : " of " + std::to_string(App.Sessions.size())), Dim, Right);
-        std::string Launch = "new sessions start in " + App.LaunchCwd;
+        std::string Launch = "new ones start in " + HomeCwd(App);
         if(Right - (HX + 16) >= TextWidth(Launch) + 1) { PutText(F, Right - TextWidth(Launch) - 1, ST, Launch, Dim, Right); }
 
         if(App.FilterEditing || !App.Filter.empty())

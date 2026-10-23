@@ -21,7 +21,7 @@ struct clodw
     s32 CursorY;
     bool32 CursorHidden;
     s32 MouseMode;
-    u32 PrefixKey;   // the server's command prefix, for the direct shortcuts
+    u32 PrefixKey;   // the server's command prefix
     s32 CursorShape; // DECSCUSR from the server (0 default, 1/2 block, 3/4 underline, 5/6 bar; odd blinks)
     s32 PaneCount;
     s32 Panes[4][4]; // pane rectangles {x, y, w, h}: a selection stays inside one
@@ -1205,24 +1205,24 @@ static int WindowMain(s32 JumpToTab)
                     continue;
                 }
                 // --- clod commands without the prefix (only a window can tell Ctrl+Shift+T from Ctrl+T):
-                // sent as the prefix plus the command's key ---
-                char Command = 0;
-                if(Ctrl && !Alt && Msg.wParam == VK_TAB) { Command = Shift ? 'p' : 'n'; }
+                // Ctrl+Tab cycles tabs as Ctrl+PgDn/PgUp do; the rest go to the home screen (CSI 7777 ~,
+                // which never toggles back out of it) and press its key there ---
+                const char* Command = 0;
+                if(Ctrl && !Alt && Msg.wParam == VK_TAB) { Command = Shift ? "\x1b[5;5~" : "\x1b[6;5~"; }
                 else if(Ctrl && Shift && !Alt)
                 {
                     switch(Msg.wParam)
                     {
-                        case 'T': Command = 't'; break; // new shell
-                        case 'N': Command = 'c'; break; // new session in this folder
-                        case 'O': Command = 'o'; break; // new session in a folder you type
-                        case 'S': Command = 'h'; break; // home screen
-                        case VK_SPACE: Command = 'h'; break;
-                        case 'W': Command = 'x'; break; // close tab (asks y/n)
+                        case 'T': Command = "\x1b[7777~t"; break; // new shell, in this tab's folder
+                        case 'N': Command = "\x1b[7777~n"; break; // new claude, in this tab's folder
+                        case 'O': Command = "\x1b[7777~o"; break; // new claude in a folder you type
+                        case 'S': Command = "\x1b[7777~"; break;  // home screen
+                        case VK_SPACE: Command = "\x1b[7777~"; break;
+                        case 'W': Command = "\x1b[7777~x"; break; // close this tab (asks y/n)
                     }
                 }
                 if(Command)
                 {
-                    C.InBytes += (char)C.PrefixKey;
                     C.InBytes += Command;
                     continue;
                 }

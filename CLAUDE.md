@@ -115,14 +115,22 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
 ## Panes
 
 - The area between the bars shows a layout of panes (`app_state::Layout`: single, side by side,
-  2x2 grid, main + 2; prefix `z`/`v`/`g`/`b`; Alt+Q / Alt+Shift+Q cycle the focus, prefix
-  arrows move it by direction; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
+  2x2 grid, main + 2; `z`/`v`/`g`/`b` on the home screen; Alt+Q / Alt+Shift+Q cycle the focus
+  anywhere, ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
   or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
-  Picking a tab another pane shows (Enter on the home screen, prefix + its number) swaps the two
-  panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
-  cycling (Ctrl+PgUp/PgDn, prefix `n`/`p`) skips such tabs and never moves the focus (`CycleTab`). `App.Active` is always the
+  Picking a tab another pane shows (Enter or its number on the home screen, Alt+number) swaps the
+  two panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
+  cycling (Ctrl+PgUp/PgDn, clodw Ctrl+Tab) skips such tabs and the home screen and never moves the
+  focus (`CycleTab`). `App.Active` is always the
   focused pane's tab, so code that uses `ActiveTab` (keys, prompts, the command bar) still works.
-- The home screen (prefix `h`, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
+- clod is modal, and the mode is what the focused pane shows. In a tab every key goes to the
+  program except the prefix, which takes the pane to the home screen with that tab selected and
+  remembered (`App.CameFrom`). On the home screen clod takes every key, single letters with no
+  prefix: Enter/1-9 show a tab here, ←/→/Tab move to another pane, `t`/`n`/`N`/`o` start new ones
+  (in `HomeCwd`: the remembered tab's folder), `x` close, `R` restart, `z`/`v`/`g`/`b` layouts, `/`
+  filter, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
+  There is no armed-prefix state and no prefix + key chords.
+- The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
   counts) is where a pane picks what it shows: "Running" lists every tab (number, name, what it's
   doing, folder; `x` closes the selected one), then keys for new ones, then the Claude Code
   sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
@@ -210,16 +218,17 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
   stops the server but keeps `tabs.txt`. It asks first only if some claude tab is mid-reply
   (`tab::TitleBusy`) or some shell tab is running a program (its cmd has a child process).
   An idle shell at its prompt or an idle claude doesn't count.
-- In the clod window, `q` (home screen) and prefix `q` only **detach**. Stop and end-all are
+- In the clod window, `q` (home screen) only **detaches**. Stop and end-all are
   not reachable from the window UI. A tab is dropped only by closing it (prefix `x`) or by `exit`
   in its cmd. Claude exiting returns the tab to its shell.
 - The command prefix is `Ctrl+\` by default (`prefix = ctrl+...` in `~\.clod\settings.txt`, read on
-  server start and each attach; `PrefixFromName`/`PrefixName` in `clod_app.cpp`). Pressing it twice
-  sends the key itself. The command bar lists the prefix commands only while the prefix is armed
-  (whole entries, dropped when they don't fit); otherwise, in a tab, its left side is empty and the
-  right shows only a grey "Ctrl+\ commands" (status and scroll position take that spot when
-  present). clodw adds direct shortcuts (Ctrl+Tab, Ctrl+Shift+T/N/O/S/W/Space) that it sends as prefix +
-  key, using the `PrefixKey` the server puts in each `MSG_CELLS` header.
+  server start and each attach; `PrefixFromName`/`PrefixName` in `clod_app.cpp`). It toggles
+  between a tab and the home screen; it can't be sent to a program (pick another prefix if one
+  needs it). The command bar lists the home screen's keys there (whole entries, dropped when they
+  don't fit); in a tab its left side is empty and the right shows only a grey "Ctrl+\ home"
+  (status and scroll position take that spot when present). clodw adds direct shortcuts: Ctrl+Tab
+  sends Ctrl+PgDn/PgUp, Ctrl+Shift+T/N/O/W/S/Space send CSI 7777 ~ (`KEY_GO_HOME`: home, never
+  back) plus the home key (`t`, `n`, `o`, `x`).
 - The top bar shows **only** the name of what each top pane shows (above it; the focused one in
   the accent; lower panes' names sit on their rule) and, on the right, how many tabs run and how
   many want a look. No tab list: switching happens on the home screen. Commands, the close-tab
