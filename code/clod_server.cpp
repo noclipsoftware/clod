@@ -1121,7 +1121,7 @@ static int ServerMain()
             }
             if(!Why.empty() && Unseen && NowMs - T->NotifiedAtMs > 10000)
             {
-                TrayNotify(Tray, TabName(*T), Why, I + 1);
+                if(ReadSetting("notifications") != "off") { TrayNotify(Tray, TabName(*T), Why, I + 1); } // clodw's window menu toggles it
                 T->NotifiedAtMs = NowMs;
             }
         }

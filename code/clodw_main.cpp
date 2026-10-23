@@ -187,6 +187,7 @@ static void CheckOpacity(const clodw& C)
 
 #define IDM_THEME 0x0300 // + 16 * index into Themes
 #define IDM_GOOD_PROGRAMMER 0x0400 // "Be a good programmer" on/off
+#define IDM_NOTIFICATIONS 0x0500   // "Notifications" on/off (settings notifications = off)
 
 // "Be a good programmer" lives in the user's global CLAUDE.md, which every Claude Code session on the
 // machine reads (in clod or not): on = the principles (~\.clod\good-programmer.md) sit there between
@@ -853,6 +854,8 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
         {
             bool32 On = ReadWholeFile(GlobalClaudeMd()).find(GoodStart) != std::string::npos;
             CheckMenuItem(GetSystemMenu(Window, FALSE), IDM_GOOD_PROGRAMMER, MF_BYCOMMAND | (On ? MF_CHECKED : MF_UNCHECKED));
+            bool32 Notify = ReadSetting("notifications") != "off";
+            CheckMenuItem(GetSystemMenu(Window, FALSE), IDM_NOTIFICATIONS, MF_BYCOMMAND | (Notify ? MF_CHECKED : MF_UNCHECKED));
         } break;
         case WM_SYSCOMMAND:
         {
@@ -877,6 +880,13 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
                     std::wstring Text = L"Couldn't update " + GlobalClaudeMd();
                     MessageBoxW(Window, Text.c_str(), L"clod", MB_OK | MB_ICONWARNING);
                 }
+                return 0;
+            }
+            // Notifications: the tray banners (a turn finished, a bell, OSC 9) on or off; the server reads
+            // settings.txt each time it would show one.
+            if(Cmd == IDM_NOTIFICATIONS)
+            {
+                WriteSetting("notifications", ReadSetting("notifications") == "off" ? "on" : "off");
                 return 0;
             }
             // Theme > Nord etc.: colors for the terminal and clod's bars; saved to settings.txt.
@@ -1170,6 +1180,7 @@ static int WindowMain(s32 JumpToTab)
     CheckTheme(C);
     ApplyTitleBar(C);
     AppendMenuW(WindowMenu, MF_STRING, IDM_GOOD_PROGRAMMER, L"Be a good programmer");
+    AppendMenuW(WindowMenu, MF_STRING, IDM_NOTIFICATIONS, L"Notifications");
     C.Dpi = GetDpiForWindow(C.Window);
     ApplyFont(C);
 
