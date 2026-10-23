@@ -923,27 +923,29 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             GoToPage(App, App.Page + (K.Kind == KEY_PGDN ? 1 : -1));
             continue;
         }
-        // Alt+\: to the tab that has waited longest for you, wherever it is: one that needs input
-        // first, else one with a notice (finished while unseen), else the next claude that's working
-        // (in tab order after this one, so presses go round them). Its page comes up and its pane gets
-        // the focus; one no pane shows comes into the focused pane. The tab already here is skipped.
+        // Alt+\: round the tabs that want you, wherever they are, in one ring: those that need input
+        // (longest waiting first), then those with a notice (finished while unseen, longest first),
+        // then working claudes (tab order). Each press goes to the one after the tab here, back to the
+        // start after the last. Its page comes up and its pane gets the focus; one no pane shows comes
+        // into the focused pane.
         if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == '\\' && App.PrefixKey != (PREFIX_ALT | '\\'))
         {
-            tab* Want = 0;
-            for(s32 Pass = 0; Pass < 2 && !Want; ++Pass)
+            std::vector<tab*> Ring;
+            for(s32 Kind = 0; Kind < 3; ++Kind)
             {
+                size_t First = Ring.size();
                 for(tab* T : App.Tabs)
                 {
-                    bool32 Wants = (Pass == 0) ? T->NeedsInput : !T->Notice.empty();
-                    if(Wants && T != ActiveTab(App) && (!Want || T->WantsSinceMs < Want->WantsSinceMs)) { Want = T; }
+                    bool32 InRing = (Kind == 0) ? T->NeedsInput : (Kind == 1) ? (!T->NeedsInput && !T->Notice.empty()) : (T->TitleBusy && !T->NeedsInput && T->Notice.empty());
+                    if(InRing) { Ring.push_back(T); }
                 }
+                if(Kind < 2) { std::stable_sort(Ring.begin() + First, Ring.end(), [](const tab* A, const tab* B) { return A->WantsSinceMs < B->WantsSinceMs; }); }
             }
-            s32 Count = (s32)App.Tabs.size();
-            for(s32 I = 1; I <= Count && !Want; ++I)
-            {
-                tab* T = App.Tabs[(Max(App.Active, 1) - 1 + I) % Count];
-                if(T->TitleBusy && T != ActiveTab(App)) { Want = T; }
-            }
+            tab* Here = ActiveTab(App);
+            tab* Want = 0;
+            for(size_t I = 0; I < Ring.size(); ++I) { if(Ring[I] == Here) { Want = Ring[(I + 1) % Ring.size()]; } }
+            if(!Want && !Ring.empty()) { Want = Ring[0]; }
+            if(Want == Here) { Want = 0; } // only this one: nowhere else to go
             if(!Want)
             {
                 App.Status = "Nothing needs you or is working";
