@@ -241,7 +241,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         L"CLAUDECODE", L"CLAUDE_CODE_CHILD_SESSION", L"CLAUDE_CODE_SESSION_ID", L"CLAUDE_CODE_SESSION_ATTENDED",
         L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
         L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
-        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL",
+        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"CLOD_DIR",
     };
     std::wstring Env;
     wchar_t* Block = GetEnvironmentStringsW();
@@ -269,6 +269,9 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         Env += L"CLINK_PATH=" + Completions;
         Env.push_back(0);
     }
+    // Where clod.exe is (with a trailing backslash), so the shell can run `clod view` (clod.lua's alias).
+    Env += L"CLOD_DIR=" + ExeDir();
+    Env.push_back(0);
     Env.push_back(0);
 
     std::string Error;
@@ -339,7 +342,7 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
     bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY ||
                            Prev.CursorShape != Next.CursorShape;
     bool32 PanesChanged = Prev.PaneCount != Next.PaneCount || memcmp(Prev.Panes, Next.Panes, sizeof(Next.Panes)) != 0 ||
-                          Prev.PaneMouseTaken != Next.PaneMouseTaken;
+                          Prev.PaneMouseTaken != Next.PaneMouseTaken || Prev.ImagePane != Next.ImagePane || Prev.ImagePath != Next.ImagePath;
     if(!RowCount && !CursorChanged && !TitleChanged && !PanesChanged) { return false; }
 
     msg_cells H = {};
@@ -360,10 +363,13 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
         H.Panes[P][3] = Next.Panes[P].H;
     }
     H.PaneMouseTaken = Next.PaneMouseTaken;
+    H.ImagePane = Next.ImagePane;
+    H.ImagePathLen = (u32)Next.ImagePath.size();
     H.TitleLen = (u32)Title.size();
     H.RowCount = RowCount;
     Out.append((const char*)&H, sizeof(H));
     Out += Title;
+    Out += Next.ImagePath;
     Out += Rows;
     return true;
 }
@@ -946,6 +952,21 @@ static int ServerMain()
                 ToClient += T->Term.PassThrough;
                 T->Term.PassThrough.clear();
                 TabSyncScroll(*T);
+                // --- `clod view <file>` ran in this tab: decode a small copy for the half-block preview
+                // (clodw decodes its own); the image covers the tab until a key or click ---
+                if(!T->Term.View.empty())
+                {
+                    if(DecodeImage(Utf8ToWide(T->Term.View), 640, 400, T->ViewPixels, &T->ViewW, &T->ViewH, &T->ViewFullW, &T->ViewFullH))
+                    {
+                        T->ViewImage = T->Term.View;
+                    }
+                    else
+                    {
+                        App.Status = "Can't show " + T->Term.View.substr(T->Term.View.find_last_of("\\/") + 1) + ": not an image Windows can read";
+                        App.StatusUntil = NowMs + 5000;
+                    }
+                    T->Term.View.clear();
+                }
                 // --- new output off screen (the home screen says so): only when it added lines or moved
                 // the cursor to another row since the tab was last seen; clink redrawing its prompt in
                 // place (git status arriving) or ConPTY repainting after a resize doesn't count ---
@@ -1127,6 +1148,7 @@ static int ServerMain()
             FILETIME Ft = {};
             GetSystemTimeAsFileTime(&Ft);
             u64 NowFt = ((u64)Ft.dwHighDateTime << 32) | Ft.dwLowDateTime;
+            App.WindowDrawsImages = ClientCells;
             Compose(App, NowMs, NowFt, Next, App.BarHits);
 
             OutBytes.clear();

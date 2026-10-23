@@ -69,6 +69,7 @@ struct vt_terminal
     std::string Reply;
     std::string PassThrough;
     std::string Notify; // latest OSC 9 / OSC 777 notification text, cleared by the reader
+    std::string View;   // OSC 7777;view;<path> from `clod view`: an image file to show, cleared by the reader
     bool32 Bell;
 };
 
@@ -643,6 +644,11 @@ static void VtOscDispatch(vt_terminal& T)
             // OSC 777;notify;<title>;<body>
             if(strncmp(Arg, "notify;", 7) == 0) { T.Notify = Arg + 7; }
         } break;
+        case 7777:
+        {
+            // OSC 7777;view;<absolute path>: clod's own, sent by `clod view` running in this tab.
+            if(strncmp(Arg, "view;", 5) == 0) { T.View = Arg + 5; }
+        } break;
     }
 }
 
@@ -700,12 +706,14 @@ static void VtEscDispatch(vt_terminal& T, u8 B)
             std::string Reply = T.Reply;
             std::string Pass = T.PassThrough;
             std::string Notify = T.Notify;
+            std::string View = T.View;
             VtInit(T, T.Cols, T.Rows);
             T.Scrollback.swap(Keep);
             T.ScrollbackPushed = Pushed;
             T.Reply = Reply;
             T.PassThrough = Pass;
             T.Notify = Notify;
+            T.View = View;
         } break;
     }
 }

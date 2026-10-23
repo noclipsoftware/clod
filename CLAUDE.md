@@ -79,6 +79,15 @@ It is meant to run in any Windows terminal (Windows Terminal, conhost/cmd.exe, G
     bar follows the theme (dark/light, and on Windows 11 the bar's colors, via DWM). Dim text is
     drawn halfway to the background, so it works on light themes. 256-color and RGB output from
     programs isn't themed.
+- Image preview: `view <file>` in a tab (clod.lua's alias for `clod view`, found via the tab's
+  `CLOD_DIR`) writes OSC 7777;view;<absolute path> to its console; ConPTY passes it through like
+  OSC 9, the emulator keeps it in `vt_terminal::View`, and the server decodes the file
+  (`DecodeImage` in `clod_image.cpp`, Windows Imaging Component) into `tab::ViewImage`. The image
+  covers the tab's pane above a caption row until a key or click (not passed to the program).
+  clodw draws the real image: `MSG_CELLS` names the pane and path, clodw decodes its own copy into
+  a mipmapped texture and the pixel shader draws it inside `ImageRect` (fitted, never above its own
+  size at the window's DPI). Console clients get half blocks (`▀`/`▄`, two pixels a cell) from
+  Compose.
 - Bump `CLOD_PROTOCOL_VERSION` (`clod_ipc.cpp`) whenever a message's layout or meaning changes:
   the server turns away an attach from another build with a "quit clod from the tray" message.
 - A second client takes over from the first. The open tab list is persisted in

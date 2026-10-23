@@ -72,3 +72,9 @@ if on_path("ls.exe") then
     os.setalias("ls", ls.."$*")
     os.setalias("ll", ls.."-ghGA $*")
 end
+
+-- --- view <image>: shows an image over this tab (clod view; any key closes it) ---
+local clod_dir = os.getenv("CLOD_DIR")
+if clod_dir then
+    os.setalias("view", '"'..clod_dir..'clod.exe" view $*')
+end

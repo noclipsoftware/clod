@@ -29,6 +29,13 @@ struct tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
     std::string HistorySaved; // what that file holds, to skip rewriting it unchanged
     bool32 ReplayHistory;   // restored after a restart: cmd types the saved output before its prompt
+    // --- an image `clod view` asked for, shown over the tab until a key or a click closes it ---
+    std::string ViewImage;        // its path (UTF-8); empty = none
+    std::vector<u32> ViewPixels;  // a small premultiplied BGRA copy for the half-block preview
+    u32 ViewW;
+    u32 ViewH;
+    u32 ViewFullW;                // the file's own size, for the caption
+    u32 ViewFullH;
     pty* Pty;
 };
 
@@ -103,6 +110,7 @@ struct app_state
     tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
     std::string PathInput;
     bool32 MouseCaptureOff;
+    bool32 WindowDrawsImages; // the attached client (clodw) draws images itself: panes leave them blank
     bool32 InPaste;
     std::string PasteBuf;
     std::string Status;
@@ -804,6 +812,11 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 continue;
             }
 
+            if(!Target->ViewImage.empty())
+            {
+                if(Press) { Target->ViewImage.clear(); Target->ViewPixels.clear(); } // a click closes the image
+                continue;
+            }
             if(Target->Term.MouseMode && Target->ScrollOffset == 0 && !Target->Exited)
             {
                 if(Motion && Target->Term.MouseMode == 1000) { continue; }
@@ -888,6 +901,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         // --- session tab ---
+        if(!Tab->ViewImage.empty()) { Tab->ViewImage.clear(); Tab->ViewPixels.clear(); continue; } // any key closes the image
         // A fullscreen child (alternate screen) keeps its own history, so it gets the keys instead.
         if(K.Mods == KMOD_SHIFT && (K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && !Tab->Term.AltActive)
         {
@@ -971,6 +985,8 @@ struct frame
     s32 PaneCount;               // the panes' rectangles, so a window can keep a selection inside one
     pane_rect Panes[MAX_PANES];
     u32 PaneMouseTaken;          // bit per pane: clod or the program there handles the mouse, so a plain drag isn't a selection
+    s32 ImagePane;               // pane + 1 whose image the window draws over the cells (WindowDrawsImages); 0 = none
+    std::string ImagePath;
 };
 
 static cell Style(u32 Fg, u32 Bg, u16 Attr)
@@ -1032,6 +1048,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     F.CursorShape = 0;
     F.PaneCount = 0;
     F.PaneMouseTaken = 0;
+    F.ImagePane = 0;
+    F.ImagePath.clear();
     Hits.clear();
     if(W <= 0 || H <= 0) { return; }
 
@@ -1193,13 +1211,65 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         pane_rect PR = PaneRect(App, Pane);
         const tab* PaneTab = App.PaneTab[Pane];
         // The home screen takes clicks itself; a program gets them as in HandleInput.
-        bool32 Taken = !PaneTab || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited);
+        bool32 Taken = !PaneTab || !PaneTab->ViewImage.empty() || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited);
         if(Taken && !App.MouseCaptureOff) { F.PaneMouseTaken |= 1u << Pane; } // capture off: every drag selects
         bool32 Focused = (Pane == App.Focus);
         s32 Top = PR.Y;
         s32 Left = PR.X;
         s32 PW = PR.W;
         s32 Right = Left + PW; // clip for text inside the pane
+
+        if(PaneTab && !PaneTab->ViewImage.empty())
+        {
+            // --- an image from `clod view`, fitted to the pane above a caption row: the window draws it
+            // when it can (clodw), else half blocks, two pixels a cell (top in the glyph's color, bottom
+            // in the background) ---
+            s32 ImgH = Max(PR.H - 1, 1);
+            u32 VW = PaneTab->ViewW;
+            u32 VH = PaneTab->ViewH;
+            if(App.WindowDrawsImages)
+            {
+                if(!F.ImagePane) { F.ImagePane = Pane + 1; F.ImagePath = PaneTab->ViewImage; }
+            }
+            else if(VW && VH && PaneTab->ViewPixels.size() == (size_t)VW * VH)
+            {
+                double Scale = fmin(PW / (double)VW, ImgH * 2 / (double)VH);
+                s32 DW = Max(1, (s32)(VW * Scale));
+                s32 DH = Max(1, (s32)(VH * Scale));
+                s32 OX = (PW - DW) / 2;
+                s32 OY = (ImgH * 2 - DH) / 2;
+                for(s32 R = 0; R < ImgH; ++R)
+                {
+                    for(s32 X = 0; X < PW; ++X)
+                    {
+                        u32 Px[2] = {};
+                        bool32 Opaque[2] = {};
+                        for(s32 Half = 0; Half < 2; ++Half)
+                        {
+                            s32 Sx = X - OX;
+                            s32 Sy = R * 2 + Half - OY;
+                            if(Sx < 0 || Sy < 0 || Sx >= DW || Sy >= DH) { continue; }
+                            u32 P = PaneTab->ViewPixels[(size_t)((u32)Sy * VH / DH) * VW + (u32)Sx * VW / DW];
+                            Opaque[Half] = (P >> 24) >= 128;
+                            Px[Half] = Rgb((P >> 16) & 255, (P >> 8) & 255, P & 255);
+                        }
+                        cell C = {};
+                        if(Opaque[0]) { C = Style(Px[0], Opaque[1] ? Px[1] : 0, 0); C.Codepoint = 0x2580; } // ▀
+                        else if(Opaque[1]) { C = Style(Px[1], 0, 0); C.Codepoint = 0x2584; } // ▄
+                        else { continue; }
+                        F.Cells[(size_t)(Top + R) * W + Left + X] = C;
+                    }
+                }
+            }
+            std::string Name = PaneTab->ViewImage.substr(PaneTab->ViewImage.find_last_of("\\/") + 1);
+            std::string Size = std::to_string(PaneTab->ViewFullW) + "\xC3\x97" + std::to_string(PaneTab->ViewFullH); // ×
+            s32 CY = Top + PR.H - 1;
+            FillRow(F, CY, Left, Right, Bar);
+            s32 CX = PutText(F, Left + 1, CY, TruncateText(Name, Max(PW - 30, 8)), Style(Ui(UI_BRIGHT), Ui(UI_BAR), ATTR_BOLD), Right);
+            CX = PutText(F, CX + 2, CY, Size, Bar, Right);
+            PutText(F, CX + 3, CY, "any key closes", BarDim, Right);
+            continue;
+        }
 
         if(PaneTab)
         {

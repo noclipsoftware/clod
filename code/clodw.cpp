@@ -26,10 +26,12 @@
 #include <commdlg.h>
 #include <imm.h>
 #include <dwmapi.h>
+#include <wincodec.h>
 
 #include "clod_base.h"
 #include "clod_ipc.cpp"
 #include "clod_settings.cpp"
+#include "clod_image.cpp"
 #include "clodw_render.cpp"
 #include "clodw_glyphs.cpp"
 #include "clodw_main.cpp"

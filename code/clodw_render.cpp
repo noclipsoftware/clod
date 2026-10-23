@@ -40,6 +40,7 @@ struct alignas(16) gpu_consts
     u32 CursorThick; // underline / bar cursor thickness in pixels
     u32 Opacity;     // 0..255, for GPU_SEE_THROUGH backgrounds and the margin
     u32 Pad[2];
+    u32 ImageRect[4]; // x0, y0, x1, y1 in pixels where the image texture is drawn (`clod view`); empty = none
 };
 
 #define ATLAS_SIZE 2048
@@ -66,6 +67,9 @@ struct renderer
     u32 CellCapacity;
     ID3D11Texture2D* Atlas;
     ID3D11ShaderResourceView* AtlasView;
+    ID3D11Texture2D* Image;    // `clod view`'s image, with mipmaps so any size samples smoothly
+    ID3D11ShaderResourceView* ImageView;
+    ID3D11SamplerState* Linear;
 
     // Glyph drawing: Direct2D renders into Scratch, whose tiles are copied into the atlas.
     ID2D1Factory* D2D;
@@ -82,9 +86,12 @@ cbuffer Consts : register(b0)
     uint CellW; uint CellH; uint GridW; uint GridH;
     uint MarginColor; uint UnderlineY; uint StrikeY; uint LineH;
     uint CursorThick; uint Opacity; uint Pad1; uint Pad2;
+    uint4 ImageRect;
 };
 StructuredBuffer<Cell> Cells : register(t0);
 Texture2D<float4> Atlas : register(t1);
+Texture2D<float4> Image : register(t2);
+SamplerState Linear : register(s0);
 
 float3 Unpack(uint C) { return float3(C & 255, (C >> 8) & 255, (C >> 16) & 255) / 255.0; }
 
@@ -100,6 +107,14 @@ float4 PsMain(float4 Pos : SV_Position) : SV_Target
     uint2 P = uint2(Pos.xy);
     uint2 C = uint2(P.x / CellW, P.y / CellH);
     float See = Opacity / 255.0;
+    if(all(P >= ImageRect.xy) && all(P < ImageRect.zw))
+    {
+        // The image (premultiplied) over the margin color; the gradient picks the mip for its scale.
+        float2 Size = float2(ImageRect.zw - ImageRect.xy);
+        float2 Uv = (float2(P - ImageRect.xy) + 0.5) / Size;
+        float4 I = Image.SampleGrad(Linear, Uv, float2(1.0 / Size.x, 0), float2(0, 1.0 / Size.y));
+        return float4(I.rgb + Unpack(MarginColor) * (1 - I.a), 1);
+    }
     if(C.x >= GridW || C.y >= GridH) { return float4(Unpack(MarginColor) * See, See); }
     uint2 In = P - C * uint2(CellW, CellH);
     Cell K = Cells[C.y * GridW + C.x];
@@ -200,6 +215,11 @@ static bool32 RendererCreate(renderer& R, HWND Window)
     CDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     CDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     R.Device->CreateBuffer(&CDesc, 0, &R.Consts);
+    D3D11_SAMPLER_DESC SDesc = {};
+    SDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    SDesc.AddressU = SDesc.AddressV = SDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    SDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    R.Device->CreateSamplerState(&SDesc, &R.Linear);
 
     // --- glyph atlas: premultiplied BGRA tiles, filled by copies from the Direct2D scratch ---
     D3D11_TEXTURE2D_DESC TDesc = {};
@@ -251,6 +271,28 @@ static void RendererSetCellSize(renderer& R, s32 CellW, s32 CellH)
     R.Draw2D->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &R.White);
 }
 
+// The image `clod view` shows: premultiplied BGRA, W x H, top row first. W = 0 drops it.
+static void RendererSetImage(renderer& R, const u32* Pixels, u32 W, u32 H)
+{
+    ReleaseCom(R.ImageView);
+    ReleaseCom(R.Image);
+    if(!W || !H) { return; }
+    D3D11_TEXTURE2D_DESC TDesc = {};
+    TDesc.Width = W;
+    TDesc.Height = H;
+    TDesc.MipLevels = 0; // the full chain, filled by GenerateMips
+    TDesc.ArraySize = 1;
+    TDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    TDesc.SampleDesc.Count = 1;
+    TDesc.Usage = D3D11_USAGE_DEFAULT;
+    TDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    TDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    if(FAILED(R.Device->CreateTexture2D(&TDesc, 0, &R.Image))) { return; }
+    R.Device->CreateShaderResourceView(R.Image, 0, &R.ImageView);
+    R.Context->UpdateSubresource(R.Image, 0, 0, Pixels, W * 4, 0);
+    R.Context->GenerateMips(R.ImageView);
+}
+
 // Everything, for starting over after the GPU device is lost (driver update, TDR).
 static void RendererRelease(renderer& R)
 {
@@ -262,6 +304,9 @@ static void RendererRelease(renderer& R)
     ReleaseCom(R.D2D);
     ReleaseCom(R.AtlasView);
     ReleaseCom(R.Atlas);
+    ReleaseCom(R.ImageView);
+    ReleaseCom(R.Image);
+    ReleaseCom(R.Linear);
     ReleaseCom(R.CellsView);
     ReleaseCom(R.Cells);
     ReleaseCom(R.Consts);
@@ -341,8 +386,9 @@ static bool32 RendererDraw(renderer& R, const std::vector<gpu_cell>& Cells, cons
     R.Context->VSSetShader(R.VertexShader, 0, 0);
     R.Context->PSSetShader(R.PixelShader, 0, 0);
     R.Context->PSSetConstantBuffers(0, 1, &R.Consts);
-    ID3D11ShaderResourceView* Views[2] = {R.CellsView, R.AtlasView};
-    R.Context->PSSetShaderResources(0, 2, Views);
+    ID3D11ShaderResourceView* Views[3] = {R.CellsView, R.AtlasView, R.ImageView};
+    R.Context->PSSetShaderResources(0, 3, Views);
+    R.Context->PSSetSamplers(0, 1, &R.Linear);
     R.Context->Draw(3, 0);
     HRESULT Hr = R.SwapChain->Present(1, 0);
     return !(Hr == DXGI_ERROR_DEVICE_REMOVED || Hr == DXGI_ERROR_DEVICE_RESET);

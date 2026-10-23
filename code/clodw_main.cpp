@@ -27,6 +27,11 @@ struct clodw
     s32 Panes[4][4]; // pane rectangles {x, y, w, h}: a selection stays inside one
     u32 PaneMouseTaken; // bit per pane: the program there (or the home screen) takes the mouse
     std::string Title;
+    s32 ImagePane;         // pane + 1 showing the image `clod view` asked for; 0 = none
+    std::string ImagePath; // that image, decoded into ImagePixels and the renderer
+    std::vector<u32> ImagePixels;
+    u32 ImageW;
+    u32 ImageH;
 
     // --- selection, in cells (inclusive): drag, or Shift+drag while a program has the mouse ---
     bool32 Selecting;      // a drag is under way
@@ -344,6 +349,24 @@ static void Tick(clodw& C)
             size_t At = sizeof(H);
             std::string Title = Payload.substr(At, H.TitleLen);
             At += H.TitleLen;
+            std::string Image = Payload.substr(Min((s32)At, (s32)Payload.size()), H.ImagePathLen);
+            At += H.ImagePathLen;
+            C.ImagePane = H.ImagePane;
+            if(Image != C.ImagePath)
+            {
+                // A new image (or none): decode it at up to 4096 pixels a side; the GPU's mipmaps scale it down.
+                C.ImagePath = Image;
+                u32 FullW = 0, FullH = 0;
+                C.ImageW = C.ImageH = 0;
+                C.ImagePixels.clear();
+                if(!Image.empty())
+                {
+                    std::wstring Wide(Image.size() + 1, 0);
+                    Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Image.data(), (int)Image.size(), &Wide[0], (int)Wide.size()));
+                    DecodeImage(Wide, 4096, 4096, C.ImagePixels, &C.ImageW, &C.ImageH, &FullW, &FullH);
+                }
+                RendererSetImage(C.R, C.ImagePixels.data(), C.ImageW, C.ImageH);
+            }
             // A new grid or new panes: the selection no longer points at what was selected.
             bool32 Reshaped = (H.Flags & CELLS_FULL) || H.Width != C.GridW || H.Height != C.GridH ||
                               H.PaneCount != C.PaneCount || memcmp(H.Panes, C.Panes, sizeof(C.Panes)) != 0;
@@ -601,6 +624,23 @@ static void Tick(clodw& C)
     Consts.LineH = (u32)C.F.LineH;
     Consts.CursorThick = (u32)Max(2, C.F.CellW / 6);
     Consts.Opacity = (u32)((100 - C.Transparency) * 255 / 100);
+    // --- the image `clod view` shows: fitted to its pane above the caption row, centred, never
+    // larger than its own size at this DPI ---
+    if(C.ImagePane >= 1 && C.ImagePane <= C.PaneCount && C.ImageW && C.ImageH)
+    {
+        const s32* P = C.Panes[C.ImagePane - 1];
+        float AreaX = (float)(P[0] * C.F.CellW);
+        float AreaY = (float)(P[1] * C.F.CellH);
+        float AreaW = (float)(P[2] * C.F.CellW);
+        float AreaH = (float)(Max(P[3] - 1, 1) * C.F.CellH);
+        float Scale = fminf(fminf(AreaW / C.ImageW, AreaH / C.ImageH), (float)C.Dpi / 96.0f);
+        float DW = C.ImageW * Scale;
+        float DH = C.ImageH * Scale;
+        Consts.ImageRect[0] = (u32)(AreaX + (AreaW - DW) / 2);
+        Consts.ImageRect[1] = (u32)(AreaY + (AreaH - DH) / 2);
+        Consts.ImageRect[2] = Consts.ImageRect[0] + (u32)Max(1, (s32)DW);
+        Consts.ImageRect[3] = Consts.ImageRect[1] + (u32)Max(1, (s32)DH);
+    }
     bool32 Drawn = RendererDraw(C.R, C.Gpu, Consts);
     LatencyMark("client_present");
     if(!Drawn)
@@ -610,6 +650,7 @@ static void Tick(clodw& C)
         RendererRelease(C.R);
         if(!RendererCreate(C.R, C.Window)) { C.Quit = true; return; }
         ApplyFont(C);
+        RendererSetImage(C.R, C.ImagePixels.data(), C.ImageW, C.ImageH);
     }
 }
 

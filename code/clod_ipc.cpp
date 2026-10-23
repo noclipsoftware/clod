@@ -10,7 +10,7 @@ enum msg_type
     MSG_OUTPUT, // server -> client: VT bytes for the console
     MSG_BYE,    // server -> client: reason text; the client restores its console and exits
     MSG_WIDTHS, // client -> server: sorted u32 codepoints the client's console draws 2 cells wide where CharWidth says 1
-    MSG_CELLS,  // server -> client (ATTACH_CELLS): msg_cells, the UTF-8 title, then RowCount x (s32 Y, cell[Width])
+    MSG_CELLS,  // server -> client (ATTACH_CELLS): msg_cells, the UTF-8 title, the image path, then RowCount x (s32 Y, cell[Width])
     MSG_MONITOR, // client -> server: which monitor the window is on (MonitorKey); each monitor keeps its layout
 };
 
@@ -21,7 +21,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a client from another build is turned away
 // with a clear message instead of misreading the stream.
-#define CLOD_PROTOCOL_VERSION 5
+#define CLOD_PROTOCOL_VERSION 6
 
 struct msg_attach
 {
@@ -52,6 +52,8 @@ struct msg_cells
     s32 PaneCount;   // pane rectangles {x, y, w, h} in cells: a selection stays inside its pane
     s32 Panes[4][4];
     u32 PaneMouseTaken; // bit per pane: the program there (or the home screen) takes the mouse
+    s32 ImagePane;      // pane + 1 showing an image file (`clod view`) the client draws itself; 0 = none
+    u32 ImagePathLen;   // its UTF-8 path follows the title
     u32 TitleLen;
     u32 RowCount;
 };
