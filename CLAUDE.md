@@ -186,7 +186,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing
   its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
-- Alt+` goes to the tab that has waited longest for you, wherever it is: a claude that needs input
+- Alt+\ (unless it's the prefix) goes to the tab that has waited longest for you, wherever it is: a claude that needs input
   first (`tab::WantsSinceMs`, set when it starts needing input or gets a notice), else one with a
   notice; its page comes up and its pane gets the focus (a tab no pane shows comes into the focused
   pane). The tab already in the focused pane is skipped; with none, "Nothing needs you".
@@ -287,12 +287,12 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - In the clod window, `q` (home screen) only **detaches**. Stop and end-all are
   not reachable from the window UI. A tab is dropped only by closing it (`x` on the home screen) or by `exit`
   in its cmd. Claude exiting returns the tab to its shell.
-- The command prefix is `Alt+\` by default (`prefix = alt+<char>` or `prefix = ctrl+...` in
+- The command prefix is ``Alt+` `` by default (`prefix = alt+<char>` or `prefix = ctrl+...` in
   `~\.clod\settings.txt`, read on server start and each attach; `PrefixFromName`/`PrefixName` in
   `clod_app.cpp`; an Alt key is `PREFIX_ALT | char` and arrives as ESC + char). Ctrl+\ goes to programs. It toggles
   between a tab and the home screen; it can't be sent to a program (pick another prefix if one
   needs it). The command bar lists the home screen's keys there (whole entries, dropped when they
-  don't fit); in a tab its left side is empty and the right shows only a grey "Alt+\ home"
+  don't fit); in a tab its left side is empty and the right shows only a grey "Alt+` home"
   (status and scroll position take that spot when present). clodw adds direct shortcuts: Ctrl+Tab
   sends Ctrl+PgDn/PgUp, Ctrl+Shift+T/N/O/W/S/Space send CSI 7777 ~ (`KEY_GO_HOME`: home, never
   back) plus the home key (`t`, `n`, `o`, `x`).

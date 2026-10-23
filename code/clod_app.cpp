@@ -26,7 +26,7 @@ struct tab
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     bool32 NeedsInput;      // claude asked for the user (bell, OSC 9) and nothing has been typed into it since
-    u64 WantsSinceMs;       // when it began to need input, or got its notice (Alt+` goes to the longest waiting)
+    u64 WantsSinceMs;       // when it began to need input, or got its notice (Alt+\ goes to the longest waiting)
     u64 NotifiedAtMs;       // last tray notification about this tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
     std::string HistorySaved; // what that file holds, to skip rewriting it unchanged
@@ -120,7 +120,7 @@ struct app_state
     s32 Selected; // home screen: 0..Tabs-1 = a running tab, then the filtered sessions
     s32 ListScroll;
 
-    u32 PrefixKey;      // the key that goes home / back (settings "prefix"; default Alt+\): a control byte, or PREFIX_ALT | a character
+    u32 PrefixKey;      // the key that goes home / back (settings "prefix"; default Alt+`): a control byte, or PREFIX_ALT | a character
     u64 CycleShownUntil; // the tab switcher box shows until then (ms; Ctrl+Tab, Ctrl+PgUp/PgDn); 0 = not shown
     tab* CameFrom;      // the tab the focused pane showed before the prefix brought it home: Esc goes back
     s32 Prompt;
@@ -166,7 +166,7 @@ struct app_command
     std::string Title;
 };
 
-// --- the prefix key: a control byte ("Ctrl+]"), or PREFIX_ALT | a character ("Alt+\", the default) ---
+// --- the prefix key: a control byte ("Ctrl+]"), or PREFIX_ALT | a character ("Alt+`", the default) ---
 
 #define PREFIX_ALT 0x100u
 
@@ -923,10 +923,10 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             GoToPage(App, App.Page + (K.Kind == KEY_PGDN ? 1 : -1));
             continue;
         }
-        // Alt+`: to the tab that has waited longest for you, wherever it is: one that needs input
+        // Alt+\: to the tab that has waited longest for you, wherever it is: one that needs input
         // first, else one with a notice (finished while unseen). Its page comes up and its pane gets
         // the focus; one no pane shows comes into the focused pane. The tab already here is skipped.
-        if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == '`')
+        if(K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == '\\' && App.PrefixKey != (PREFIX_ALT | '\\'))
         {
             tab* Want = 0;
             for(s32 Pass = 0; Pass < 2 && !Want; ++Pass)

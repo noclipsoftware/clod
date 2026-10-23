@@ -333,11 +333,11 @@ static void CloseTab(app_state& App, tab* T)
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
 }
 
-// The prefix key from settings.txt ("prefix = alt+\", "prefix = ctrl+]"), or Alt+\ when unset or unusable.
+// The prefix key from settings.txt ("prefix = alt+`", "prefix = ctrl+]"), or Alt+` when unset or unusable.
 static u32 LoadPrefixKey()
 {
     s32 Key = PrefixFromName(ReadSetting("prefix"));
-    return Key >= 0 ? (u32)Key : (PREFIX_ALT | '\\');
+    return Key >= 0 ? (u32)Key : (PREFIX_ALT | '`');
 }
 
 // Shows an image over tab T (`clod view`): Path itself, or when Path is a folder its first image;
