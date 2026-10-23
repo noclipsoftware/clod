@@ -778,6 +778,13 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         // Alt+arrows pick a pane. 2x2 grid: up = top left, right = top right, left = bottom left,
         // down = bottom right. Side by side: down = left, right = right. Other cases go to the program.
         bool32 Arrow = K.Kind == KEY_UP || K.Kind == KEY_RIGHT || K.Kind == KEY_LEFT || K.Kind == KEY_DOWN;
+        // Ctrl+Shift+Alt+arrows pick the layout: up = single, right = side by side, down = 2x2 grid,
+        // left = main + 2.
+        if(Arrow && K.Mods == (KMOD_CTRL | KMOD_SHIFT | KMOD_ALT))
+        {
+            SetLayout(App, K.Kind == KEY_UP ? LAYOUT_SINGLE : (K.Kind == KEY_RIGHT ? LAYOUT_SIDE : (K.Kind == KEY_DOWN ? LAYOUT_GRID : LAYOUT_MAIN)));
+            continue;
+        }
         if(Arrow && K.Mods == KMOD_ALT && App.Layout == LAYOUT_GRID)
         {
             FocusPane(App, K.Kind == KEY_UP ? 0 : (K.Kind == KEY_RIGHT ? 1 : (K.Kind == KEY_LEFT ? 2 : 3)));
