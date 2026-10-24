@@ -512,22 +512,37 @@ static s32 TabSection(const tab& T)
     return T.TitleBusy ? SECTION_WORKING : SECTION_COMPLETED;
 }
 
+static std::string TabName(const tab& Tab);
+
 // The running area's rows, top down: a tab's index into Tabs, or -1 - section for a heading. The
-// selection counts only the tab rows, in this order.
+// selection counts only the tab rows, in this order. The filter (/) keeps the tabs whose name,
+// folder or session id has it, like the sessions.
 static std::vector<s32> HomeRows(const app_state& App)
 {
     std::vector<s32> Rows;
+    std::string Needle = ToLower(App.Filter);
     for(s32 Section = 0; Section < SECTION_COUNT; ++Section)
     {
         size_t Heading = Rows.size();
         for(s32 I = 0; I < (s32)App.Tabs.size(); ++I)
         {
-            if(TabSection(*App.Tabs[I]) != Section) { continue; }
+            const tab& T = *App.Tabs[I];
+            if(TabSection(T) != Section) { continue; }
+            if(!Needle.empty() && ToLower(TabName(T) + " " + T.Cwd + " " + T.SessionId).find(Needle) == std::string::npos) { continue; }
             if(Rows.size() == Heading) { Rows.push_back(-1 - Section); }
             Rows.push_back(I);
         }
     }
     return Rows;
+}
+
+// How many tab rows the home screen lists (all tabs, or the filter's matches): the selection's
+// sessions part starts there.
+static s32 HomeTabCount(const app_state& App)
+{
+    s32 Count = 0;
+    for(s32 Row : HomeRows(App)) { Count += (Row >= 0); }
+    return Count;
 }
 
 // The running tab the home screen's selection is on, or null (it's on a session).
@@ -546,12 +561,15 @@ static tab* HomeSelectedTab(const app_state& App)
 #define HOME_TOP 1
 #define HOME_LEFT 2
 
+// The running tabs' first row: below the filter line and a blank row while there's a filter.
+static s32 HomeTabsTop(const app_state& App) { return HOME_TOP + ((App.FilterEditing || !App.Filter.empty()) ? 2 : 0); }
+
 // The Claude Code sessions are listed when asked for (s, a filter), or when nothing runs yet.
 static bool32 HomeSessionsOpen(const app_state& App) { return App.SessionsShown || App.Tabs.empty(); }
 
 // Below the running tabs and their keys row: a blank row, the pages row and another blank row when
 // there are pages, then the sessions.
-static s32 HomeSessionsRow(const app_state& App) { return HOME_TOP + Max((s32)HomeRows(App).size(), 1) + 2 + (App.Pages.size() > 1 ? 2 : 0); }
+static s32 HomeSessionsRow(const app_state& App) { return HomeTabsTop(App) + Max((s32)HomeRows(App).size(), 1) + 2 + (App.Pages.size() > 1 ? 2 : 0); }
 static s32 HomeListRow(const app_state& App) { return HomeSessionsRow(App) + 3; }
 static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH - HomeListRow(App)); }
 
@@ -559,7 +577,7 @@ static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH -
 // list as the focused pane shows it.
 static void HomeMoveSelection(app_state& App, s32 Delta)
 {
-    s32 Running = (s32)App.Tabs.size();
+    s32 Running = HomeTabCount(App);
     s32 Count = Running + (HomeSessionsOpen(App) ? (s32)FilterSessions(App).size() : 0);
     App.Selected = Clamp(App.Selected + Delta, 0, Max(0, Count - 1));
     s32 Rows = HomeListRows(App, ContentRows(App.Height));
@@ -572,7 +590,7 @@ static void HomeMoveSelection(app_state& App, s32 Delta)
 // Enter on the home screen: a running tab comes into this pane, a session opens (or its tab does).
 static void OpenSelected(app_state& App, std::vector<app_command>& Cmds)
 {
-    s32 Running = (s32)App.Tabs.size();
+    s32 Running = HomeTabCount(App);
     tab* Picked = HomeSelectedTab(App);
     if(Picked) { SwitchTab(App, TabIndex(App, Picked)); return; }
     std::vector<s32> Filtered = FilterSessions(App);
@@ -806,7 +824,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             {
                 for(char C : App.PasteBuf) { if((u8)C >= 0x20) { App.Filter += C; } }
                 App.FilterEditing = true;
-                App.Selected = (s32)App.Tabs.size(); // the first match
+                App.Selected = 0; // the first match (a tab before any session)
                 App.ListScroll = 0;
             }
             else if(!Tab->Exited)
@@ -1071,13 +1089,13 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             if(App.HomeOpen)
             {
                 // --- home screen: a click selects a running tab or a session, a second click opens it ---
-                s32 Running = (s32)App.Tabs.size();
+                s32 Running = HomeTabCount(App);
                 s32 Clicked = -1;
                 std::vector<s32> Rows = HomeRows(App);
                 for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size(); ++Ri)
                 {
                     if(Rows[Ri] < 0) { continue; }
-                    if(Ri == Y - 1 - HOME_TOP) { Clicked = Pos; }
+                    if(Ri == Y - 1 - HomeTabsTop(App)) { Clicked = Pos; }
                     Pos += 1;
                 }
                 s32 ListRow = HomeListRow(App);
@@ -1138,20 +1156,20 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         // --- home screen ---
         if(App.HomeOpen)
         {
-            s32 Running = (s32)App.Tabs.size();
+            s32 Running = HomeTabCount(App);
             tab* SelectedTab = HomeSelectedTab(App);
             bool32 Typing = App.FilterEditing && K.Kind == KEY_CHAR && !(K.Mods & (KMOD_CTRL | KMOD_ALT));
             if(Typing)
             {
                 AppendUtf8(App.Filter, K.Codepoint);
-                App.Selected = Running; // the first match
+                App.Selected = 0; // the first match: a tab before any session, so Enter goes to it
                 App.ListScroll = 0;
             }
             else if(K.Kind == KEY_BACKSPACE && App.FilterEditing)
             {
                 while(!App.Filter.empty() && ((u8)App.Filter.back() & 0xC0) == 0x80) { App.Filter.pop_back(); }
                 if(!App.Filter.empty()) { App.Filter.pop_back(); }
-                App.Selected = Running;
+                App.Selected = 0;
                 App.ListScroll = 0;
             }
             else if(K.Kind == KEY_ESC && !App.FilterEditing && App.Filter.empty()) { App.HomeOpen = false; }
@@ -1743,10 +1761,25 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         // (folded to one line until asked for), a row down and two columns in from the pane's edges ---
         std::vector<s32> Rows = HomeRows(App);
         s32 Bottom = Top + PR.H; // rows below belong to other panes or the command bar
-        s32 RowsTop = Top + HOME_TOP;
+        s32 RowsTop = Top + HomeTabsTop(App);
         Left += HOME_LEFT;
         cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
-        if(Rows.empty()) { PutText(F, Left + 1, RowsTop, "Nothing running yet.", Dim, Right); }
+        // The filter (/) on top: what's typed narrows the tabs and the sessions, the first match
+        // selected, so Enter goes straight to it.
+        if(App.FilterEditing || !App.Filter.empty())
+        {
+            s32 FY = Top + HOME_TOP;
+            s32 FX = PutText(F, Left + 1, FY, "/ ", Accent, Right);
+            FX = PutText(F, FX, FY, App.Filter, cell{}, Right);
+            if(Focused && App.FilterEditing && FX < Right)
+            {
+                F.CursorHidden = false;
+                F.CursorX = FX;
+                F.CursorY = FY;
+            }
+            if(!App.FilterEditing) { PutText(F, FX + 3, FY, "Esc clear", Dim, Right); }
+        }
+        if(Rows.empty()) { PutText(F, Left + 1, RowsTop, App.Tabs.empty() ? "Nothing running yet." : "No tabs match.", Dim, Right); }
         s32 NameX = Left + 9;
         s32 NameW = Clamp(PW / 3, 12, 40);
         s32 StatusX = NameX + NameW + 2;
@@ -1759,7 +1792,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 // --- a section heading and how many it holds ---
                 s32 Section = -1 - Rows[Ri];
                 s32 Count = 0;
-                for(const tab* T : App.Tabs) { Count += (TabSection(*T) == Section); }
+                for(s32 Row : Rows) { Count += (Row >= 0 && TabSection(*App.Tabs[Row]) == Section); }
                 cell Head = Style(Section == SECTION_NEEDS_INPUT ? Ui(UI_ACCENT) : 0, 0, ATTR_BOLD);
                 s32 HX = PutText(F, Left + 1, Y, SectionNames[Section], Head, Right);
                 PutText(F, HX + 2, Y, std::to_string(Count), Dim, Right);
@@ -1848,21 +1881,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         std::string Launch = "new ones start in " + HomeCwd(App);
         if(Right - (HX + 16) >= TextWidth(Launch) + 1) { PutText(F, Right - TextWidth(Launch) - 1, ST, Launch, Dim, Right); }
 
-        if(App.FilterEditing || !App.Filter.empty())
-        {
-            s32 FX = PutText(F, Left + 1, ST + 1, "/ ", Accent, Right);
-            FX = PutText(F, FX, ST + 1, App.Filter, cell{}, Right);
-            if(Focused && App.FilterEditing && FX < Right)
-            {
-                F.CursorHidden = false;
-                F.CursorX = FX;
-                F.CursorY = ST + 1;
-            }
-        }
-        else
-        {
-            PutText(F, Left + 1, ST + 1, "/ to filter", Dim, Right);
-        }
+        if(!App.FilterEditing && App.Filter.empty()) { PutText(F, Left + 1, ST + 1, "/ to filter", Dim, Right); } // the filter itself is at the top
 
         const s32 AgeW = 5;
         const s32 ProjW = 18;
@@ -1884,7 +1903,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             s32 Index = Scroll + R;
             const session_info& S = App.Sessions[Filtered[Index]];
             s32 Y = ListY + R;
-            bool32 Sel = Focused && (s32)App.Tabs.size() + Index == App.Selected;
+            bool32 Sel = Focused && HomeTabCount(App) + Index == App.Selected;
             cell Row = Sel ? Style(0, Ui(UI_ROW), 0) : cell{};
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);

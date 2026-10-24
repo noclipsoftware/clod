@@ -1505,7 +1505,7 @@ static int ServerMain()
             }
             if(Changed)
             {
-                s32 Running = (s32)App.Tabs.size();
+                s32 Running = HomeTabCount(App);
                 std::vector<s32> Filtered = FilterSessions(App);
                 s32 Index = App.Selected - Running;
                 std::string Kept = (Index >= 0 && Index < (s32)Filtered.size()) ? App.Sessions[Filtered[Index]].Id : std::string();

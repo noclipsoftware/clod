@@ -188,6 +188,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   showing it come up focused; a tab no pane shows comes into the focused pane), `t`/`n`/`N`/`o`
   start new ones into the focused pane (in `HomeCwd`: the focused tab's folder), `x` close, `R`
   restart, `/` filter, `s` show/fold the sessions, `m` mouse capture, `r` rescan, `q` detach.
+  The filter is a quick tab switcher: its line sits at the top (`HomeTabsTop`), each key narrows
+  the running tabs (name, folder, session id; `HomeRows`) and the sessions, and selects the first
+  match, a tab before any session, so Enter goes straight to it. `HomeTabCount` is where the
+  selection's sessions part starts.
   A pane with no tab (`PaneTab` null) says "empty  <prefix> home"; a key or click there opens
   home. There is no armed-prefix state and no prefix + key chords.
 - The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
