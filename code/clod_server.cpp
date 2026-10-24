@@ -109,6 +109,119 @@ static DWORD WINAPI SessionsScanThread(void* Param)
     return 0;
 }
 
+// Tray apps with unread messages, for the command bar: settings.txt's `apps` (exe names, default
+// "slack discord", "off" = none) want a look while their notification-area icon has a badge, a
+// colored dot on an otherwise white icon. Neither app says so anywhere else (their window titles
+// don't change), so this asks explorer for its tray buttons and reads their icons: on its own
+// thread, since explorer may be slow to answer. Wanting out (exe names as written, setting order).
+struct apps_scan
+{
+    std::vector<std::string> Wanting;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+static DWORD WINAPI AppsScanThread(void* Param)
+{
+    apps_scan* S = (apps_scan*)Param;
+    std::string Setting = ReadSetting("apps");
+    if(Setting.empty()) { Setting = "slack discord"; }
+    std::vector<std::string> Apps;
+    for(size_t At = 0; Setting != "off" && At < Setting.size();)
+    {
+        size_t End = Setting.find_first_of(" ,", At);
+        if(End == std::string::npos) { End = Setting.size(); }
+        if(End > At) { Apps.push_back(Setting.substr(At, End - At)); }
+        At = End + 1;
+    }
+    std::vector<std::string> Badged; // exe names without .exe
+    // The tray's buttons live in toolbars: under TrayNotifyWnd (Windows 11, hidden icons included),
+    // its SysPager (Windows 10) and the overflow window's (Windows 10's hidden icons). A missing
+    // parent is skipped: FindWindowEx with none would search the top-level windows.
+    HWND Tray = FindWindowW(L"Shell_TrayWnd", 0);
+    HWND Notify = Tray ? FindWindowExW(Tray, 0, L"TrayNotifyWnd", 0) : 0;
+    HWND Pager = Notify ? FindWindowExW(Notify, 0, L"SysPager", 0) : 0;
+    HWND Overflow = FindWindowW(L"NotifyIconOverflowWindow", 0);
+    HWND Bars[3] = {Notify ? FindWindowExW(Notify, 0, L"ToolbarWindow32", 0) : 0,
+                    Pager ? FindWindowExW(Pager, 0, L"ToolbarWindow32", 0) : 0,
+                    Overflow ? FindWindowExW(Overflow, 0, L"ToolbarWindow32", 0) : 0};
+    for(s32 B = 0; B < 3 && !Apps.empty(); ++B)
+    {
+        if(!Bars[B] || (B > 0 && Bars[B] == Bars[0])) { continue; }
+        DWORD ExplorerPid = 0;
+        GetWindowThreadProcessId(Bars[B], &ExplorerPid);
+        HANDLE Explorer = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, ExplorerPid);
+        void* Remote = Explorer ? VirtualAllocEx(Explorer, 0, sizeof(TBBUTTON), MEM_COMMIT, PAGE_READWRITE) : 0;
+        DWORD_PTR Count = 0;
+        if(Remote) { SendMessageTimeoutW(Bars[B], TB_BUTTONCOUNT, 0, 0, SMTO_ABORTIFHUNG, 500, &Count); }
+        for(DWORD_PTR I = 0; I < Count && I < 256; ++I)
+        {
+            // Each button's data, in explorer's memory: owner window, id, message, two reserved words, icon.
+            struct tray_data { HWND Owner; UINT Id; UINT Message; UINT Reserved[2]; HICON Icon; };
+            TBBUTTON Button = {};
+            tray_data Data = {};
+            DWORD_PTR Got = 0;
+            if(!SendMessageTimeoutW(Bars[B], TB_GETBUTTON, I, (LPARAM)Remote, SMTO_ABORTIFHUNG, 500, &Got) || !Got) { continue; }
+            if(!ReadProcessMemory(Explorer, Remote, &Button, sizeof(Button), 0)) { continue; }
+            if(!ReadProcessMemory(Explorer, (void*)Button.dwData, &Data, sizeof(Data), 0) || !Data.Icon) { continue; }
+            // Whose icon: the owner window's exe, if it's one of the apps.
+            DWORD OwnerPid = 0;
+            GetWindowThreadProcessId(Data.Owner, &OwnerPid);
+            HANDLE Owner = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, OwnerPid);
+            wchar_t Path[MAX_PATH] = {};
+            DWORD PathLen = MAX_PATH;
+            if(Owner) { QueryFullProcessImageNameW(Owner, 0, Path, &PathLen); CloseHandle(Owner); }
+            std::string Exe = WideToUtf8(PathFindFileNameW(Path));
+            if(Exe.size() > 4) { Exe.resize(Exe.size() - 4); }
+            bool32 Listed = false;
+            for(const std::string& A : Apps) { Listed |= _stricmp(A.c_str(), Exe.c_str()) == 0; }
+            if(!Listed) { continue; }
+            // A badge: at least 1 in 20 of the icon's opaque pixels strongly colored (icons are shared
+            // across processes, so its bitmap can be read here).
+            ICONINFO Info = {};
+            if(!GetIconInfo(Data.Icon, &Info)) { continue; }
+            BITMAP Bm = {};
+            GetObjectW(Info.hbmColor, sizeof(Bm), &Bm);
+            std::vector<u32> Px((size_t)Max(Bm.bmWidth, 0) * Max(Bm.bmHeight, 0));
+            BITMAPINFO Bi = {};
+            Bi.bmiHeader.biSize = sizeof(Bi.bmiHeader);
+            Bi.bmiHeader.biWidth = Bm.bmWidth;
+            Bi.bmiHeader.biHeight = -Bm.bmHeight;
+            Bi.bmiHeader.biPlanes = 1;
+            Bi.bmiHeader.biBitCount = 32;
+            HDC Dc = GetDC(0);
+            s32 Opaque = 0;
+            s32 Colored = 0;
+            if(!Px.empty() && Px.size() <= 512 * 512 && GetDIBits(Dc, Info.hbmColor, 0, Bm.bmHeight, Px.data(), &Bi, DIB_RGB_COLORS))
+            {
+                for(u32 C : Px)
+                {
+                    s32 R = (C >> 16) & 255, G = (C >> 8) & 255, Bl = C & 255;
+                    if((C >> 24) < 128) { continue; }
+                    Opaque++;
+                    if(Max(R, Max(G, Bl)) - Min(R, Min(G, Bl)) > 100) { Colored++; }
+                }
+            }
+            ReleaseDC(0, Dc);
+            if(Info.hbmColor) { DeleteObject(Info.hbmColor); }
+            if(Info.hbmMask) { DeleteObject(Info.hbmMask); }
+            if(Opaque && Colored * 20 >= Opaque) { Badged.push_back(Exe); }
+        }
+        if(Remote) { VirtualFreeEx(Explorer, Remote, 0, MEM_RELEASE); }
+        if(Explorer) { CloseHandle(Explorer); }
+    }
+    for(const std::string& A : Apps)
+    {
+        for(const std::string& Exe : Badged)
+        {
+            if(_stricmp(A.c_str(), Exe.c_str()) == 0) { S->Wanting.push_back(Exe); break; }
+        }
+    }
+    InterlockedExchange(&S->Done, 1);
+    SetEvent(S->Wake);
+    return 0;
+}
+
 // A process scan handed to its own thread: CmdPids in, Finds out, then Done and the loop's Wake.
 struct claude_scan
 {
@@ -919,6 +1032,8 @@ static int ServerMain()
     claude_scan* Scan = 0;      // a look under way on its own thread
     u64 SessionsScanMs = 0;     // last re-read of the Claude Code sessions (SessionsScanThread)
     sessions_scan* SessionsScan = 0;
+    u64 AppsScanMs = 0;         // last look at the tray apps' icons (AppsScanThread)
+    apps_scan* AppsScan = 0;
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
     std::string OuterTitle;
     std::vector<u32> OuterWide;  // sorted codepoints the attached console draws 2 cells wide where CharWidth says 1
@@ -1380,6 +1495,22 @@ static int ServerMain()
             HANDLE Thread = CreateThread(0, 0, SessionsScanThread, SessionsScan, 0, 0);
             if(Thread) { CloseHandle(Thread); }
             else { delete SessionsScan; SessionsScan = 0; }
+        }
+        // --- tray apps with unread messages (AppsScanThread), every 2 s while a window is attached ---
+        if(AppsScan && AppsScan->Done)
+        {
+            if(AppsScan->Wanting != App.AppsWanting) { App.AppsWanting.swap(AppsScan->Wanting); Dirty = true; }
+            delete AppsScan;
+            AppsScan = 0;
+        }
+        if(!AppsScan && Attached && NowMs - AppsScanMs >= 2000)
+        {
+            AppsScanMs = NowMs;
+            AppsScan = new apps_scan();
+            AppsScan->Wake = Wake;
+            HANDLE Thread = CreateThread(0, 0, AppsScanThread, AppsScan, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete AppsScan; AppsScan = 0; }
         }
         if(Attached && !ToClient.empty() && !IpcSendString(Client, MSG_OUTPUT, ToClient)) { IpcClose(Client); Attached = false; }
 

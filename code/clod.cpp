@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <sddl.h>
 #include <tlhelp32.h>
 #include <winternl.h>

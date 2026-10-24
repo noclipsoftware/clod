@@ -141,6 +141,7 @@ struct app_state
     std::vector<std::wstring> VsPrepend; // put in front of the variable's own value (PATH, INCLUDE, ...)
     std::vector<std::wstring> VsAppend;  // put after it
     std::string Clock;  // local date and time for the command bar's left ("Thu Oct 23  2:05 PM"), set by the server
+    std::vector<std::string> AppsWanting; // tray apps whose icon has a badge ("Slack", "Discord"), set by the server
     std::vector<bar_hit> BarHits; // from the last composed frame
     bool32 Quit; // set by the server (tray Quit): stop, reopening the tabs with --resume next launch
 };
@@ -1537,6 +1538,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 std::string Date = (Gap == std::string::npos) ? std::string() : App.Clock.substr(0, Gap + 2);
                 BX = PutText(F, BX, Y, Date, LabelStyle, W);
                 BX = PutText(F, BX, Y, App.Clock.substr(Date.size()), Style(Ui(UI_BRIGHT), CmdBar.Bg, 0), W) + 3;
+            }
+            // Then the tray apps with unread messages (their icon has a badge), so a glance says they want you.
+            for(const std::string& Name : App.AppsWanting)
+            {
+                if(BX + TextWidth(Name) >= RightX) { break; }
+                BX = PutText(F, BX, Y, Name, Style(Ui(UI_NOTE), CmdBar.Bg, 0), W) + 3;
             }
             // Whole entries only: the first one that doesn't fit ends the list.
             s32 ListEnd = (Right.empty() || Important) ? KeysEnd : RightX - 2;

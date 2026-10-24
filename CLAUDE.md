@@ -95,7 +95,13 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   - F11: fullscreen (borderless `WS_POPUP` over the monitor) and back; programs never get F11. The
     window place saved on exit is the one from before fullscreen.
   - The command bar's left shows the local date and time (`App.Clock`, set by the server in the
-    user's own formats each minute), after the keep-active light's cell.
+    user's own formats each minute), after the keep-active light's cell. After it, the names of
+    tray apps with unread messages (`App.AppsWanting`; settings.txt `apps`, exe names, default
+    `slack discord`, `off` = none): their window titles never say so, but their notification-area
+    icon gets a colored badge on a white logo. `AppsScanThread` (every 2 s while attached) reads
+    explorer's tray toolbar buttons (`TB_GETBUTTON` into memory allocated in explorer; each
+    button's data holds the owner window and the `HICON`) and calls an icon badged when 1 in 20
+    of its opaque pixels is strongly colored.
   - Opacity (`opacity = 85` in settings.txt, or the window menu's Opacity submenu, which saves it;
     20-100, missing = 100; new installs get 95 from the default `shell/settings.txt`): the swap chain goes through DirectComposition with premultiplied alpha
     (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background
