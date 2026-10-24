@@ -1664,7 +1664,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         Left += HOME_LEFT;
         cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
         if(Rows.empty()) { PutText(F, Left + 1, RowsTop, "Nothing running yet.", Dim, Right); }
-        s32 NameX = Left + 5;
+        s32 NameX = Left + 9;
         s32 NameW = Clamp(PW / 3, 12, 40);
         s32 StatusX = NameX + NameW + 2;
         s32 CwdX = StatusX + 16;
@@ -1688,10 +1688,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             cell RowDim = Style(Ui(UI_DIM), Row.Bg, 0);
             FillRow(F, Y, Left, Right, Row);
             if(Sel) { PutText(F, Left + 1, Y, "\xE2\x80\xBA", Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD), Right); } // ›
-            // The number (1-9 / Alt+digit shows it) is in the accent while some pane shows the tab.
+            // The number (1-9 / Alt+digit shows it), then a chip with the page a pane shows the tab on:
+            // this page's in the accent, another page's in the bar's colors, none when no pane shows it.
             std::string Num = std::to_string(Rows[Ri] + 1);
-            bool32 OnScreen = PaneShowing(App, T) >= 0;
-            PutText(F, Left + 4 - TextWidth(Num), Y, Num, OnScreen ? Style(Ui(UI_ACCENT), Row.Bg, ATTR_BOLD) : RowDim, Right);
+            s32 OnPage = (PaneShowing(App, T) >= 0) ? App.Page : OtherPageShowing(App, T);
+            PutText(F, Left + 4 - TextWidth(Num), Y, Num, RowDim, Right);
+            if(OnPage >= 0) { PutText(F, Left + 5, Y, " " + std::to_string(OnPage + 1) + " ", OnPage == App.Page ? BarActive : BarShown, Right); }
             PutText(F, NameX, Y, TruncateText(TabName(*T), NameW), Sel ? Style(0, Row.Bg, ATTR_BOLD) : Row, Right);
 
             // --- beyond its section: a notice (finished while unseen, ...), else what a shell runs ---
@@ -1704,14 +1706,11 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else if(Shell && T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
             else if(Shell) { Status = "at prompt"; }
             PutText(F, StatusX, Y, TruncateText(Status, 15), StatusStyle, Right);
-            // On another page: says which, before the folder (Enter moves the tab here).
-            s32 OnPage = OtherPageShowing(App, T);
-            std::string Where = (OnPage >= 0 ? "page " + std::to_string(OnPage + 1) + " \xC2\xB7 " : std::string()) + T->Cwd; // ·
-            PutText(F, CwdX, Y, TruncateText(Where, Right - CwdX - 1), RowDim, Right);
+            PutText(F, CwdX, Y, TruncateText(T->Cwd, Right - CwdX - 1), RowDim, Right);
         }
         {
             static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
-            s32 KX = Left + 5;
+            s32 KX = Left + 9;
             s32 KY = RowsTop + Max((s32)Rows.size(), 1);
             for(u32 I = 0; I + 1 < ArrayCount(NewKeys) && KY < Bottom; I += 2)
             {

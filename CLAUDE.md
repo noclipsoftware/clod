@@ -204,7 +204,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   anywhere, clodw's Ctrl+Alt+1-9 jump (CSI 7778 ; N ~, `KEY_GO_PAGE`); on the home screen `P` new
   page (same layout, panes home), `X` close page (its tabs keep running), `[`/`]` switch. Pages
   show as numbers in the top bar (more than one; a click switches) and on the home screen's
-  Pages row; a tab on another page says "page N" in its row. tabs.txt keeps them (`pages`,
+  Pages row; each running tab's row has a chip with the page a pane shows it on (this page in the accent, another in the bar's colors, none when no pane shows it). tabs.txt keeps them (`pages`,
   `page` lines).
 - Changing layout keeps the focused tab on screen and fills new panes with tabs nothing shows
   (`SetLayout`); closing a tab gives its pane the next unshown one (`ForgetTab`).
