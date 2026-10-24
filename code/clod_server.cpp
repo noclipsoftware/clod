@@ -88,6 +88,7 @@ struct claude_find
     std::string Id;
     std::string Cwd;
     std::string ShellCwd;
+    u64 CpuUsed;     // CPU time the cmd and everything under it used since the last scan (100 ns units)
 };
 
 // The home screen's Claude Code sessions, re-read on their own thread (hundreds of transcripts):
@@ -227,6 +228,9 @@ struct claude_scan
 {
     std::vector<DWORD> CmdPids;
     std::vector<claude_find> Finds;
+    std::map<std::pair<DWORD, u64>, u64> Cpu; // in: each tab process's CPU time at the last scan, by pid and start time; out: now
+    u64 PrevAtFt;  // in: when the last scan read them (0 = none yet)
+    u64 AtFt;      // out: when this one did
     HANDLE Wake;
     volatile LONG Done;
 };
@@ -239,6 +243,10 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
 {
     claude_scan* S = (claude_scan*)Param;
     std::vector<PROCESSENTRY32W> Procs = ListProcesses();
+    FILETIME NowFt = {};
+    GetSystemTimeAsFileTime(&NowFt);
+    S->AtFt = ((u64)NowFt.dwHighDateTime << 32) | NowFt.dwLowDateTime;
+    std::map<std::pair<DWORD, u64>, u64> Cpu;
     for(const PROCESSENTRY32W& P : Procs)
     {
         if(P.th32ParentProcessID != GetCurrentProcessId() || _wcsicmp(P.szExeFile, L"conhost.exe") != 0) { continue; }
@@ -258,6 +266,24 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
         claude_find F = {};
         F.CmdPid = CmdPid;
         F.ShellCwd = ProcessCurrentDirectory(CmdPid);
+        // --- the CPU the tree used since the last scan: each process's time now less what it had then,
+        // all of it for one started since (a process that ended in between takes its last slice along) ---
+        for(DWORD Pid : Tree)
+        {
+            HANDLE Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+            FILETIME Created = {}, Ended = {}, Kernel = {}, User = {};
+            if(Process && GetProcessTimes(Process, &Created, &Ended, &Kernel, &User))
+            {
+                u64 CreatedFt = ((u64)Created.dwHighDateTime << 32) | Created.dwLowDateTime;
+                u64 Used = (((u64)Kernel.dwHighDateTime << 32) | Kernel.dwLowDateTime) + (((u64)User.dwHighDateTime << 32) | User.dwLowDateTime);
+                std::pair<DWORD, u64> Key = {Pid, CreatedFt};
+                auto Was = S->Cpu.find(Key);
+                if(Was != S->Cpu.end()) { F.CpuUsed += Used > Was->second ? Used - Was->second : 0; }
+                else if(S->PrevAtFt && CreatedFt >= S->PrevAtFt) { F.CpuUsed += Used; }
+                Cpu[Key] = Used;
+            }
+            if(Process) { CloseHandle(Process); }
+        }
         for(size_t K = 1; K < Tree.size() && !F.Pid; ++K)
         {
             if(ReadClaudeSession(Tree[K], F.Id, F.Cwd)) { F.Pid = Tree[K]; }
@@ -269,6 +295,7 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
         }
         S->Finds.push_back(F);
     }
+    S->Cpu.swap(Cpu);
     InterlockedExchange(&S->Done, 1);
     SetEvent(S->Wake);
     return 0;
@@ -1033,6 +1060,8 @@ static int ServerMain()
     u64 LaunchedWindowAtMs = 0; // tray opened a window that hasn't attached yet
     u64 ClaudeScanMs = 0;       // last look for claude processes inside the tabs
     claude_scan* Scan = 0;      // a look under way on its own thread
+    std::map<std::pair<DWORD, u64>, u64> CpuKnown; // the tabs' processes' CPU times at the last scan (tab::Cpu)
+    u64 CpuAtFt = 0;
     u64 SessionsScanMs = 0;     // last re-read of the Claude Code sessions (SessionsScanThread)
     sessions_scan* SessionsScan = 0;
     u64 AppsScanMs = 0;         // last look at the tray apps' icons (AppsScanThread)
@@ -1449,12 +1478,23 @@ static int ServerMain()
         // the loop (and typing) never waits for it; its answer is applied once it's in.
         if(Scan && Scan->Done)
         {
+            // Each tab's CPU, as a share of the whole machine since the last scan.
+            u64 Elapsed = Scan->PrevAtFt && Scan->AtFt > Scan->PrevAtFt ? Scan->AtFt - Scan->PrevAtFt : 0;
+            u64 Cores = Max((s32)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), 1);
+            CpuKnown.swap(Scan->Cpu);
+            CpuAtFt = Scan->AtFt;
             for(tab* T : App.Tabs)
             {
                 if(!T->Pty || T->Exited) { continue; }
                 const claude_find* Find = 0;
                 for(const claude_find& F : Scan->Finds) { if(F.CmdPid == GetProcessId(T->Pty->Process)) { Find = &F; } }
                 if(!Find) { continue; } // opened after the scan started
+                if(Elapsed)
+                {
+                    float Cpu = (float)(Find->CpuUsed * 100.0 / ((double)Elapsed * Cores));
+                    if((s32)(Cpu + 0.5f) != (s32)(T->Cpu + 0.5f)) { Dirty = true; }
+                    T->Cpu = Cpu;
+                }
                 // A shell's folder follows its cd, so it comes back there after a restart (tabs.txt).
                 if(T->SessionId.empty() && !Find->Pid && !Find->ShellCwd.empty() && Find->ShellCwd != T->Cwd)
                 {
@@ -1488,6 +1528,8 @@ static int ServerMain()
             ClaudeScanMs = NowMs;
             Scan = new claude_scan();
             Scan->Wake = Wake;
+            Scan->Cpu = CpuKnown;
+            Scan->PrevAtFt = CpuAtFt;
             for(tab* T : App.Tabs) { if(T->Pty && !T->Exited) { Scan->CmdPids.push_back(GetProcessId(T->Pty->Process)); } }
             HANDLE Thread = CreateThread(0, 0, ClaudeScanThread, Scan, 0, 0);
             if(Thread) { CloseHandle(Thread); }

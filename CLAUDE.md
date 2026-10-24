@@ -294,6 +294,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - A shell tab follows its cd: the claude scan thread also reads each cmd's current directory from
   its process parameters (`ProcessCurrentDirectory`, PEB) into `tab::Cwd`, so tabs.txt brings it
   back in that folder.
+- CPU per tab: the same scan sums the CPU time of each tab's cmd and everything under it
+  (claude, the scripts it runs) since the last scan, per process by pid and start time
+  (`claude_scan::Cpu`, a process started since counts whole), into `tab::Cpu`, a percent of the
+  whole machine like Task Manager's (one busy core of 16 = 6%). The command bar shows the total
+  after the clock ("cpu 12%"), home rows show each tab's from 1%; both in the note color from 25%.
 - Up-arrow history per tab: each cmd gets `CLINK_HISTORY_LABEL` = the tab's lasting id without
   dashes (session id, else `HistoryId`), so clink keeps `clink_history-<label>` in the profile, and
   the default `clink_settings` has `history.shared = True` so every command is written at once

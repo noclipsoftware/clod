@@ -26,6 +26,7 @@ struct tab
     bool32 Exited;          // cmd ended, or never started
     bool32 TitleBusy;       // claude's title shows its spinner (a turn is running)
     bool32 NeedsInput;      // claude asked for the user (bell, OSC 9) and nothing has been typed into it since
+    float Cpu;              // percent of the whole machine its cmd and everything under it used lately (server's scan)
     u64 WantsSinceMs;       // when it began to need input, or got its notice (Alt+\ goes to the longest waiting)
     u64 NotifiedAtMs;       // last tray notification about this tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
@@ -1582,6 +1583,19 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 BX = PutText(F, BX, Y, Date, LabelStyle, W);
                 BX = PutText(F, BX, Y, App.Clock.substr(Date.size()), Style(Ui(UI_BRIGHT), CmdBar.Bg, 0), W) + 3;
             }
+            // Then the CPU every tab (and all it started) uses, as a share of the machine: a busy
+            // session's script shows here, in the note color from 25%.
+            if(!App.Tabs.empty())
+            {
+                float Cpu = 0;
+                for(const tab* T : App.Tabs) { Cpu += T->Cpu; }
+                std::string Pct = std::to_string((s32)(Cpu + 0.5f)) + "%";
+                if(BX + 4 + TextWidth(Pct) < RightX)
+                {
+                    BX = PutText(F, BX, Y, "cpu ", LabelStyle, W);
+                    BX = PutText(F, BX, Y, Pct, Cpu >= 25 ? Style(Ui(UI_NOTE), CmdBar.Bg, 0) : LabelStyle, W) + 3;
+                }
+            }
             // Then the tray apps with unread messages (their icon has a badge), so a glance says they
             // want you; a click brings one up. clodw draws each app's icon over two cells, console
             // clients get its name.
@@ -1783,7 +1797,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         s32 NameX = Left + 9;
         s32 NameW = Clamp(PW / 3, 12, 40);
         s32 StatusX = NameX + NameW + 2;
-        s32 CwdX = StatusX + 16;
+        s32 CpuX = StatusX + 16;
+        s32 CwdX = CpuX + 6;
         for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size() && RowsTop + Ri < Bottom; ++Ri)
         {
             s32 Y = RowsTop + Ri;
@@ -1822,6 +1837,12 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             else if(Shell && T->Activity) { Status = "\xE2\x97\x8F new output"; StatusStyle = Style(Ui(UI_ACCENT), Row.Bg, 0); } // ●
             else if(Shell) { Status = "at prompt"; }
             PutText(F, StatusX, Y, TruncateText(Status, 15), StatusStyle, Right);
+            // Its CPU (share of the machine), from 1%; in the note color from 25%.
+            if(T->Cpu >= 1)
+            {
+                std::string Pct = std::to_string((s32)(T->Cpu + 0.5f)) + "%";
+                PutText(F, CpuX + 4 - TextWidth(Pct), Y, Pct, T->Cpu >= 25 ? Style(Ui(UI_NOTE), Row.Bg, 0) : RowDim, Right);
+            }
             PutText(F, CwdX, Y, TruncateText(T->Cwd, Right - CwdX - 1), RowDim, Right);
         }
         {
