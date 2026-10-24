@@ -161,29 +161,31 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   top right, Delete bottom left, End bottom right; side by side by column; main + 2: Insert/Delete
   the main pane, Home/End the right two; a single pane lets them reach the program), ←/→ and Tab on the home screen; Ctrl+arrows stay with the program as word jumps). Each pane shows a tab
   or the home screen (`PaneTab[]`, null = home); **a tab is never in two panes**.
-  Picking a tab another pane shows (Enter or its number on the home screen, Alt+number) swaps the
-  two panes' contents (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
+  Picking a tab (Enter or its number on the home screen, Alt+number) goes to the page and
+  pane showing it, or brings it into the focused pane when none does (`SwitchTab`); clicking a pane or its name in the top bar focuses it;
   cycling (Ctrl+PgUp/PgDn, clodw Ctrl+Tab) skips such tabs and the home screen and never moves the
   focus (`CycleTab`). Each step shows a tab switcher box in the focused pane for 1.2 s (`App.CycleShownUntil`,
   drawn last in Compose): the tabs the cycle goes through, the current one in the accent; any other key takes it down. `App.Active` is always the
   focused pane's tab, so code that uses `ActiveTab` (keys, prompts, the command bar) still works.
-- clod is modal, and the mode is what the focused pane shows. In a tab every key goes to the
-  program except the prefix, which takes the pane to the home screen with that tab selected and
-  remembered (`App.CameFrom`). On the home screen clod takes every key, single letters with no
-  prefix: Enter/1-9 show a tab here, ←/→/Tab move to another pane, `t`/`n`/`N`/`o` start new ones
-  (in `HomeCwd`: the remembered tab's folder), `x` close, `R` restart, `/`
-  filter, `s` show/fold the sessions, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
-  There is no armed-prefix state and no prefix + key chords.
+- clod has two layers. The home screen (`App.HomeOpen`) is the top one: it covers every pane
+  (drawn once over the whole area between the bars; the top bar says "Home", the command bar
+  stays) and takes every key, single letters with no prefix. Under it is the page of panes, where
+  every key goes to the focused pane's program. The prefix opens home (the focused tab selected)
+  and closes it, Esc closes it. On home: Enter/1-9 go to a tab (`SwitchTab`: the page and pane
+  showing it come up focused; a tab no pane shows comes into the focused pane), `t`/`n`/`N`/`o`
+  start new ones into the focused pane (in `HomeCwd`: the focused tab's folder), `x` close, `R`
+  restart, `/` filter, `s` show/fold the sessions, `m` mouse capture, `r` rescan, `q` detach.
+  A pane with no tab (`PaneTab` null) says "empty  <prefix> home"; a key or click there opens
+  home. There is no armed-prefix state and no prefix + key chords.
 - The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
-  counts) is where a pane picks what it shows: the running tabs in sections like Claude's agents
+  counts) is where you pick what to look at: the running tabs in sections like Claude's agents
   view (`HomeRows`/`TabSection`): Needs input (claude rang or sent OSC 9/777, `tab::NeedsInput`,
   cleared by typing into it or a new turn), Working (title spinner), Completed (idle claude),
   Shells (no claude); each row has number, name, a notice or what a shell runs, folder (`x`
   closes the selected one). Then keys for new ones, a blank row, the Pages row (only with more than
   one page) and another blank row, then the Claude Code sessions: folded to one line ("s show")
   until `s` or a filter (`/`) opens them (`App.SessionsShown`, `HomeSessionsOpen`; always open
-  while nothing runs). The whole screen sits `HOME_TOP` rows down and `HOME_LEFT` columns in. One selection (`App.Selected`) runs through both lists; only the focused pane's home
-  shows it. The sessions list is re-read every 5 s while a window is attached
+  while nothing runs). The whole screen sits `HOME_TOP` rows down and `HOME_LEFT` columns in. One selection (`App.Selected`) runs through both lists; one selection. The sessions list is re-read every 5 s while a window is attached
   (`SessionsScanThread`; `ScanSessions` reuses `Known` entries for transcripts with the same
   write time and size), keeping the selection on the same session. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)

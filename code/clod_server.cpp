@@ -885,6 +885,7 @@ static int ServerMain()
             LoadPage(App, App.Pages[App.Page]);
         }
     }
+    if(!ActiveTab(App)) { App.HomeOpen = true; } // nothing in the focused pane: start on the home screen
     std::string SavedTabs = TabsFileContents(App);
     if(!Ephemeral) { WriteTabsFile(SavedTabs); }
 

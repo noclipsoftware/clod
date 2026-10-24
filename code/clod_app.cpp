@@ -105,7 +105,7 @@ struct app_state
 
     s32 Layout;                // LAYOUT_*
     s32 Focus;                 // the pane that gets the keys
-    tab* PaneTab[MAX_PANES];   // what each pane shows; null = the home screen
+    tab* PaneTab[MAX_PANES];   // what each pane shows; null = nothing (an empty pane)
     // The current page lives in Layout/Focus/PaneTab; Pages holds every page, the current one's entry
     // refreshed when leaving it. Empty = just the one page. A tab is in at most one pane of all pages.
     std::vector<page> Pages;
@@ -123,7 +123,7 @@ struct app_state
 
     u32 PrefixKey;      // the key that goes home / back (settings "prefix"; default Alt+`): a control byte, or PREFIX_ALT | a character
     u64 CycleShownUntil; // the tab switcher box shows until then (ms; Ctrl+Tab, Ctrl+PgUp/PgDn); 0 = not shown
-    tab* CameFrom;      // the tab the focused pane showed before the prefix brought it home: Esc goes back
+    bool32 HomeOpen;    // the home screen covers all the panes; closed, the panes show their tabs
     s32 Prompt;
     tab* PromptTab;     // the tab PROMPT_CLOSE_TAB asks about
     std::string PathInput;
@@ -275,28 +275,33 @@ static tab* UnshownTab(const app_state& App, s32 From, const tab* Skip)
     return 0;
 }
 
+// Focuses a pane of this page (and leaves the home screen, which covers the panes).
 static void FocusPane(app_state& App, s32 Pane)
 {
+    App.HomeOpen = false;
     App.Focus = Clamp(Pane, 0, PaneCount(App.Layout) - 1);
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
     if(App.PaneTab[App.Focus]) { App.PaneTab[App.Focus]->Activity = false; App.PaneTab[App.Focus]->Notice.clear(); }
 }
 
-// Shows tab Index (0 = home screen) in the focused pane. A tab another pane shows swaps places:
-// that pane gets what this one had. A tab on another page moves here; its pane there goes home.
+static void GoToPage(app_state& App, s32 Index);
+
+// Goes to tab Index: the page and pane showing it come up with that pane focused, or, when no pane
+// shows it, it comes into the focused pane. Either way the home screen closes. Index 0 opens it.
 static void SwitchTab(app_state& App, s32 Index)
 {
     if(Index < 0 || Index > (s32)App.Tabs.size()) { return; }
-    tab* T = (Index > 0) ? App.Tabs[Index - 1] : 0;
-    for(page& G : App.Pages)
-    {
-        for(tab*& P : G.PaneTab) { if(T && P == T && &G != &App.Pages[App.Page]) { P = 0; } }
-    }
+    if(Index == 0) { App.HomeOpen = true; return; }
+    tab* T = App.Tabs[Index - 1];
+    App.HomeOpen = false;
+    s32 OnPage = OtherPageShowing(App, T);
+    if(OnPage >= 0) { GoToPage(App, OnPage); }
     s32 Shown = PaneShowing(App, T);
-    if(Shown >= 0) { App.PaneTab[Shown] = App.PaneTab[App.Focus]; }
+    if(Shown >= 0) { FocusPane(App, Shown); return; }
     App.PaneTab[App.Focus] = T;
     App.Active = Index;
-    if(T) { T->Activity = false; T->Notice.clear(); }
+    T->Activity = false;
+    T->Notice.clear();
 }
 
 // Next (+1) or previous (-1) tab in the focused pane, skipping tabs other panes (of any page) show
@@ -341,7 +346,6 @@ static void SetLayout(app_state& App, s32 Layout)
 static void ForgetTab(app_state& App, const tab* T)
 {
     if(App.PromptTab == T) { App.PromptTab = 0; App.Prompt = PROMPT_NONE; }
-    if(App.CameFrom == T) { App.CameFrom = 0; }
     s32 From = TabIndex(App, T); // the position just after T
     for(s32 P = 0; P < MAX_PANES; ++P)
     {
@@ -394,6 +398,7 @@ static void NewPage(app_state& App)
     Fresh.Layout = App.Layout;
     App.Pages.insert(App.Pages.begin() + App.Page + 1, Fresh);
     GoToPage(App, App.Page + 1);
+    App.HomeOpen = true; // its panes are empty: pick what they show
 }
 
 // Drops the current page (not the last one); its tabs keep running, unshown.
@@ -544,7 +549,7 @@ static void HomeMoveSelection(app_state& App, s32 Delta)
     s32 Running = (s32)App.Tabs.size();
     s32 Count = Running + (HomeSessionsOpen(App) ? (s32)FilterSessions(App).size() : 0);
     App.Selected = Clamp(App.Selected + Delta, 0, Max(0, Count - 1));
-    s32 Rows = HomeListRows(App, PaneRect(App, App.Focus).H);
+    s32 Rows = HomeListRows(App, ContentRows(App.Height));
     s32 S = App.Selected - Running; // in the sessions list
     if(S < 0) { return; }
     if(S < App.ListScroll) { App.ListScroll = S; }
@@ -596,10 +601,11 @@ static void OpenFolderPrompt(app_state& App, const std::string& Base)
     if(!Base.empty() && Base.back() != '\\' && Base.back() != '/') { App.PathInput += '\\'; }
 }
 
-// Where the home screen starts new tabs: the folder of the tab it was opened from, else the window's.
+// Where the home screen starts new tabs: the folder of the focused pane's tab, else the window's.
 static std::string HomeCwd(const app_state& App)
 {
-    return App.CameFrom ? App.CameFrom->Cwd : App.LaunchCwd;
+    const tab* Here = ActiveTab(App);
+    return Here ? Here->Cwd : App.LaunchCwd;
 }
 
 // --- input tokens ---
@@ -783,7 +789,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 bool32 Absolute = (Pasted.size() >= 2 && Pasted[1] == ':') || (!Pasted.empty() && strchr("\\/~", Pasted[0]));
                 App.PathInput = Absolute ? Pasted : App.PathInput + Pasted;
             }
-            else if(!Tab)
+            else if(App.HomeOpen)
             {
                 for(char C : App.PasteBuf) { if((u8)C >= 0x20) { App.Filter += C; } }
                 App.FilterEditing = true;
@@ -861,28 +867,23 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         // --- global keys ---
-        // The prefix: a tab's pane goes to the home screen, with that tab selected and remembered, so
-        // Enter, Esc or the prefix again go straight back; on the home screen it goes back. clodw's
-        // shortcuts send KEY_GO_HOME instead, which only ever goes home.
+        // The prefix opens the home screen over all the panes (the focused tab selected) and closes it
+        // again. clodw's shortcuts send KEY_GO_HOME instead, which only ever opens it.
         bool32 GoHome = (K.Kind == KEY_GO_HOME);
         bool32 Prefix = (App.PrefixKey & PREFIX_ALT) ? (K.Kind == KEY_CHAR && K.Mods == KMOD_ALT && K.Codepoint == (App.PrefixKey & 0xFF))
                                                      : (K.Kind == KEY_CHAR && K.Mods == KMOD_CTRL && K.Codepoint == App.PrefixKey);
         if(GoHome || Prefix)
         {
-            if(Tab)
+            if(App.HomeOpen && !GoHome) { App.HomeOpen = false; continue; }
+            App.HomeOpen = true;
+            App.Selected = 0; // the focused tab's place among the tab rows
+            for(s32 Row : HomeRows(App))
             {
-                App.CameFrom = Tab;
-                App.Selected = 0; // its place among the tab rows
-                for(s32 Row : HomeRows(App))
-                {
-                    if(Row >= 0 && App.Tabs[Row] == Tab) { break; }
-                    if(Row >= 0) { App.Selected += 1; }
-                }
-                App.Filter.clear();
-                App.FilterEditing = false;
-                SwitchTab(App, 0);
+                if(Row >= 0 && App.Tabs[Row] == Tab) { break; }
+                if(Row >= 0) { App.Selected += 1; }
             }
-            else if(!GoHome && App.CameFrom) { SwitchTab(App, TabIndex(App, App.CameFrom)); }
+            App.Filter.clear();
+            App.FilterEditing = false;
             continue;
         }
         // Alt+Q / Alt+Shift+Q: focus the next / previous pane.
@@ -1004,7 +1005,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                     {
                         if(K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
                         if(H.Pane <= -2) { GoToPage(App, -2 - H.Pane); }
-                        else if(H.Pane < 0) { SwitchTab(App, 0); }
+                        else if(H.Pane < 0) { App.HomeOpen = true; }
                         else { FocusPane(App, H.Pane); }
                     }
                 }
@@ -1019,24 +1020,31 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             bool32 Press = !Wheel && !Motion && !K.MouseRelease;
             bool32 Held = App.DragPane && !Wheel && (K.MouseRelease || (Motion && (Button & 3) != 3));
             s32 Pane = Held ? App.DragPane - 1 : -1;
-            for(s32 P = 0; P < PaneCount(App.Layout) && Pane < 0; ++P)
+            for(s32 P = 0; P < PaneCount(App.Layout) && Pane < 0 && !App.HomeOpen; ++P)
             {
                 pane_rect R = PaneRect(App, P);
                 if(Col >= R.X && Col < R.X + R.W && Row >= R.Y && Row < R.Y + R.H) { Pane = P; }
             }
             if(K.MouseRelease) { App.DragPane = 0; }
+            if(App.HomeOpen) { Pane = App.Focus; }
             if(Pane < 0) { continue; } // a separator line
-            if(Press)
+            if(Press && !App.HomeOpen)
             {
                 App.DragPane = Pane + 1;
                 if(Pane != App.Focus) { FocusPane(App, Pane); }
             }
-            pane_rect R = PaneRect(App, Pane);
+            pane_rect Whole = {0, 1, Max(App.Width, 1), ContentRows(App.Height)};
+            pane_rect R = App.HomeOpen ? Whole : PaneRect(App, Pane);
             s32 X = Clamp(Col - R.X, 0, R.W - 1) + 1; // 1-based within the pane
             s32 Y = Clamp(Row - R.Y, 0, R.H - 1) + 1;
             tab* Target = App.PaneTab[Pane];
 
-            if(!Target)
+            if(!App.HomeOpen && !Target)
+            {
+                if(LeftPress) { App.HomeOpen = true; } // an empty pane: a click opens the home screen
+                continue;
+            }
+            if(App.HomeOpen)
             {
                 // --- home screen: a click selects a running tab or a session, a second click opens it ---
                 s32 Running = (s32)App.Tabs.size();
@@ -1096,8 +1104,15 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             continue;
         }
 
+        // --- an empty pane (home closed): a key opens the home screen to pick what it shows ---
+        if(!App.HomeOpen && !Tab)
+        {
+            if(K.Kind != KEY_MOUSE) { App.HomeOpen = true; }
+            continue;
+        }
+
         // --- home screen ---
-        if(!Tab)
+        if(App.HomeOpen)
         {
             s32 Running = (s32)App.Tabs.size();
             tab* SelectedTab = HomeSelectedTab(App);
@@ -1115,7 +1130,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 App.Selected = Running;
                 App.ListScroll = 0;
             }
-            else if(K.Kind == KEY_ESC && !App.FilterEditing && App.Filter.empty() && App.CameFrom) { SwitchTab(App, TabIndex(App, App.CameFrom)); }
+            else if(K.Kind == KEY_ESC && !App.FilterEditing && App.Filter.empty()) { App.HomeOpen = false; }
             else if(K.Kind == KEY_ESC)
             {
                 App.Filter.clear();
@@ -1123,17 +1138,10 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 App.Selected = 0;
                 App.ListScroll = 0;
             }
-            else if(K.Kind == KEY_TAB || K.Kind == KEY_LEFT || K.Kind == KEY_RIGHT)
-            {
-                // Another pane gets the focus (and the keys: a program there takes them).
-                s32 Count = PaneCount(App.Layout);
-                bool32 Back = (K.Kind == KEY_LEFT) || (K.Kind == KEY_TAB && K.Mods == KMOD_SHIFT);
-                FocusPane(App, (App.Focus + (Back ? Count - 1 : 1)) % Count);
-            }
             else if(K.Kind == KEY_UP) { HomeMoveSelection(App, -1); }
             else if(K.Kind == KEY_DOWN) { HomeMoveSelection(App, 1); }
-            else if(K.Kind == KEY_PGUP) { HomeMoveSelection(App, -HomeListRows(App, PaneRect(App, App.Focus).H)); }
-            else if(K.Kind == KEY_PGDN) { HomeMoveSelection(App, HomeListRows(App, PaneRect(App, App.Focus).H)); }
+            else if(K.Kind == KEY_PGUP) { HomeMoveSelection(App, -HomeListRows(App, ContentRows(App.Height))); }
+            else if(K.Kind == KEY_PGDN) { HomeMoveSelection(App, HomeListRows(App, ContentRows(App.Height))); }
             else if(K.Kind == KEY_HOME) { HomeMoveSelection(App, -1000000); }
             else if(K.Kind == KEY_END) { HomeMoveSelection(App, 1000000); }
             else if(K.Kind == KEY_ENTER) { App.FilterEditing = false; OpenSelected(App, Cmds); }
@@ -1366,12 +1374,13 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     // on the right how many tabs run and how many want a look. Lower panes' names sit on their rule ---
     FillRow(F, 0, 0, W, Bar);
     s32 NamesEnd = 0;
-    for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
+    if(App.HomeOpen) { NamesEnd = PutText(F, 0, 0, " Home ", BarActive, W); }
+    for(s32 Pane = 0; Pane < PaneCount(App.Layout) && !App.HomeOpen; ++Pane)
     {
         pane_rect PR = PaneRect(App, Pane);
         if(PR.Y != 1) { continue; }
         const tab* T = App.PaneTab[Pane];
-        std::string Name = T ? TabName(*T) : std::string("Home");
+        std::string Name = T ? TabName(*T) : std::string("empty");
         s32 X0 = PR.X;
         s32 X = PutText(F, X0, 0, " " + TruncateText(Name, Max(PR.W - 3, 1)) + " ", Pane == App.Focus ? BarActive : BarShown, PR.X + PR.W);
         bar_hit Hit = {X0, X, Pane};
@@ -1490,11 +1499,11 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         else
         {
             static const char* HomeKeys[] = {
-                "Enter", "show here", "1-9", "show N", "\xE2\x86\x90\xE2\x86\x92", "pane", "x", "close", "R", "restart",
+                "Enter", "go to", "1-9", "go to N", "x", "close", "R", "restart",
                 "s", "sessions", "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
             };
             const char** Keys = HomeKeys;
-            s32 KeyCount = Active ? 0 : (s32)ArrayCount(HomeKeys); // in a tab the left stays empty
+            s32 KeyCount = App.HomeOpen ? (s32)ArrayCount(HomeKeys) : 0; // in a tab the left stays empty
 
             // --- right side: a status message or scroll position outranks the key hints ---
             std::string Right;
@@ -1512,8 +1521,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 RightStyle = KeyStyle;
                 Important = true;
             }
-            else if(Active) { Right = PrefixName(App.PrefixKey) + " home"; }
-            else if(App.CameFrom) { Right = "Esc back"; }
+            else if(!App.HomeOpen) { Right = PrefixName(App.PrefixKey) + " home"; }
+            else if(App.HomeOpen) { Right = "Esc close"; }
             Right = TruncateText(Right, Max(W - 3, 0));
             s32 RightX = W - TextWidth(Right) - 1;
             s32 KeysEnd = Important ? Max(RightX - 2, 0) : W;
@@ -1534,17 +1543,20 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         }
     }
 
-    // --- panes: each draws its tab, or the home screen, inside its own rectangle ---
-    F.PaneCount = PaneCount(App.Layout);
-    for(s32 Pane = 0; Pane < PaneCount(App.Layout); ++Pane)
+    // --- panes: each draws its tab inside its own rectangle; the home screen, while open, is drawn
+    // once over the whole area between the bars instead ---
+    pane_rect Whole = {0, 1, Max(W, 1), ContentRows(H)};
+    s32 DrawCount = App.HomeOpen ? 1 : PaneCount(App.Layout);
+    F.PaneCount = DrawCount;
+    for(s32 Pane = 0; Pane < DrawCount; ++Pane)
     {
-        F.Panes[Pane] = PaneRect(App, Pane);
-        pane_rect PR = PaneRect(App, Pane);
-        const tab* PaneTab = App.PaneTab[Pane];
-        // The home screen takes clicks itself; a program gets them as in HandleInput.
+        pane_rect PR = App.HomeOpen ? Whole : PaneRect(App, Pane);
+        F.Panes[Pane] = PR;
+        const tab* PaneTab = App.HomeOpen ? 0 : App.PaneTab[Pane];
+        // The home screen and empty panes take clicks themselves; a program gets them as in HandleInput.
         bool32 Taken = !PaneTab || !PaneTab->ViewImage.empty() || (PaneTab->Term.MouseMode && PaneTab->ScrollOffset == 0 && !PaneTab->Exited);
         if(Taken && !App.MouseCaptureOff) { F.PaneMouseTaken |= 1u << Pane; } // capture off: every drag selects
-        bool32 Focused = (Pane == App.Focus);
+        bool32 Focused = App.HomeOpen || (Pane == App.Focus);
         s32 Top = PR.Y;
         s32 Left = PR.X;
         s32 PW = PR.W;
@@ -1653,6 +1665,14 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 FillRow(F, Top + PR.H - 1, Left, Right, Banner);
                 PutText(F, Left + 1, Top + PR.H - 1, "cmd not started   Enter try again   " + PrefixName(App.PrefixKey) + " x close", Banner, Right);
             }
+            continue;
+        }
+
+        if(!App.HomeOpen)
+        {
+            // --- an empty pane: how to fill it ---
+            std::string Hint = "empty   " + PrefixName(App.PrefixKey) + " home";
+            PutText(F, Left + Max((PW - TextWidth(Hint)) / 2, 0), Top + PR.H / 2, Hint, Dim, Right);
             continue;
         }
 
@@ -1826,7 +1846,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     }
 
     // --- separator lines between panes; the ones bordering the focused pane are orange ---
-    if(App.Layout != LAYOUT_SINGLE)
+    if(App.Layout != LAYOUT_SINGLE && !App.HomeOpen)
     {
         pane_rect Focus = PaneRect(App, App.Focus);
         s32 SplitX = PaneRect(App, 0).W; // the vertical line's column
