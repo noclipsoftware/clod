@@ -252,6 +252,13 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `clink_settings` holds the input colors (16-color only, so they follow the palette).
   clink-completions (MIT) is vendored in `vendor/clink-completions` like clink, copied by
   `build.bat`, and put on each tab's `CLINK_PATH` by `StartTab`.
+- Every tab has Visual Studio's x64 build environment (cl, link, cmake, ninja, msbuild, INCLUDE,
+  LIB, ...; `vs_env = off` in settings.txt turns it off): `LoadVsEnv` runs the newest install's
+  `vcvars64.bat` (found with vswhere, needs the C++ x64 tools) once and keeps what it changed,
+  as a difference from the server's own environment (`App.VsSet`/`VsPrepend`/`VsAppend`), in
+  `%LOCALAPPDATA%\clod\vsenv.txt`; it runs again only when a Visual Studio folder named there is
+  gone. `StartTab` applies it to each tab's environment, so tabs start as fast as ever. Skipped
+  when the server itself was started from a developer prompt (`VSINSTALLDIR` set).
 - Never resume a session while an older claude of it is still alive: Claude then thinks another
   live session has its name and renames this one for good. So shutdown closes the pipe first,
   closes every console and waits (5 s) for the claudes to exit on their own, and startup waits

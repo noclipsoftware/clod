@@ -207,17 +207,6 @@ static std::wstring GlobalClaudeMd()
     return std::wstring(Dir) + L"\\CLAUDE.md";
 }
 
-static std::string ReadWholeFile(const std::wstring& Path)
-{
-    std::string Out;
-    FILE* File = 0;
-    _wfopen_s(&File, Path.c_str(), L"rb");
-    char Buf[4096];
-    for(size_t N = 0; File && (N = fread(Buf, 1, sizeof(Buf), File)) > 0;) { Out.append(Buf, N); }
-    if(File) { fclose(File); }
-    return Out;
-}
-
 // Puts the principles block into the global CLAUDE.md (On) or takes it out. False when the file
 // couldn't be written or there are no principles to add.
 static bool32 SetGoodProgrammer(bool32 On)

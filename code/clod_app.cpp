@@ -134,6 +134,11 @@ struct app_state
     std::string Status;
     u64 StatusUntil; // GetTickCount64 ms
     std::string LaunchCwd;
+    // Visual Studio's x64 build environment (what vcvars64.bat changes, LoadVsEnv): every tab gets it
+    // unless settings.txt has vs_env = off. "NAME=value"; empty = no Visual Studio with C++ tools.
+    std::vector<std::wstring> VsSet;     // set as is
+    std::vector<std::wstring> VsPrepend; // put in front of the variable's own value (PATH, INCLUDE, ...)
+    std::vector<std::wstring> VsAppend;  // put after it
     std::string Clock;  // local date and time for the command bar's left ("Thu Oct 23  2:05 PM"), set by the server
     std::vector<bar_hit> BarHits; // from the last composed frame
     bool32 Quit; // set by the server (tray Quit): stop, reopening the tabs with --resume next launch

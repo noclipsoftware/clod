@@ -56,6 +56,18 @@ static void WriteSetting(const char* Key, const std::string& Value)
     if(File) { fwrite(Kept.data(), 1, Kept.size(), File); fclose(File); }
 }
 
+// A whole file, or empty when it can't be read (clodw's CLAUDE.md block, the server's caches).
+static std::string ReadWholeFile(const std::wstring& Path)
+{
+    std::string Out;
+    FILE* File = 0;
+    _wfopen_s(&File, Path.c_str(), L"rb");
+    char Buf[4096];
+    for(size_t N = 0; File && (N = fread(Buf, 1, sizeof(Buf), File)) > 0;) { Out.append(Buf, N); }
+    if(File) { fclose(File); }
+    return Out;
+}
+
 // The folder clod.exe runs from, with a trailing backslash: clink and the default shell setup ship there.
 static std::wstring ExeDir()
 {

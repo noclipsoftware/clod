@@ -263,6 +263,8 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"CLOD_DIR",
     };
     std::wstring Env;
+    bool32 Vs = ReadSetting("vs_env") != "off";
+    std::vector<bool32> VsDone(App.VsSet.size(), false);
     wchar_t* Block = GetEnvironmentStringsW();
     for(const wchar_t* Var = Block; *Var; Var += wcslen(Var) + 1)
     {
@@ -270,9 +272,26 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         size_t NameLen = Eq ? (size_t)(Eq - Var) : wcslen(Var);
         bool32 Drop = false;
         for(const wchar_t* S : Strip) { if(wcslen(S) == NameLen && _wcsnicmp(Var, S, NameLen) == 0) { Drop = true; } }
-        if(!Drop) { Env.append(Var); Env.push_back(0); }
+        if(Drop) { continue; }
+        // Visual Studio's build environment changes this one: set, or put around its own value.
+        std::wstring Entry = Var;
+        for(size_t I = 0; Vs && I < App.VsSet.size(); ++I)
+        {
+            if(App.VsSet[I].find(L'=') == NameLen && _wcsnicmp(Var, App.VsSet[I].c_str(), NameLen) == 0) { Entry = App.VsSet[I]; VsDone[I] = true; }
+        }
+        for(const std::wstring& P : App.VsPrepend)
+        {
+            if(Vs && P.find(L'=') == NameLen && _wcsnicmp(Var, P.c_str(), NameLen) == 0) { Entry = P + Entry.substr(NameLen + 1); }
+        }
+        for(const std::wstring& P : App.VsAppend)
+        {
+            if(Vs && P.find(L'=') == NameLen && _wcsnicmp(Var, P.c_str(), NameLen) == 0) { Entry += P.substr(NameLen + 1); }
+        }
+        Env.append(Entry);
+        Env.push_back(0);
     }
     FreeEnvironmentStringsW(Block);
+    for(size_t I = 0; Vs && I < App.VsSet.size(); ++I) { if(!VsDone[I]) { Env.append(App.VsSet[I]); Env.push_back(0); } }
     // Each tab keeps its own clink history (clink_history_<label> in the profile), so up-arrow in a
     // tab brought back after a restart recalls that tab's commands. The label is the tab's lasting
     // id without dashes (clink allows 32 letters and digits): the session, else the shell's history id.
@@ -331,6 +350,127 @@ static void CloseTab(app_state& App, tab* T)
     delete T;
     App.Tabs.erase(It);
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
+}
+
+// A program's whole output (stdout and stderr), run hidden; empty if it can't start.
+static std::string RunCapture(std::wstring Cmd)
+{
+    SECURITY_ATTRIBUTES Sa = {sizeof(Sa), 0, TRUE};
+    HANDLE Read = 0;
+    HANDLE Write = 0;
+    if(!CreatePipe(&Read, &Write, &Sa, 0)) { return std::string(); }
+    SetHandleInformation(Read, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW Si = {};
+    Si.cb = sizeof(Si);
+    Si.dwFlags = STARTF_USESTDHANDLES;
+    Si.hStdOutput = Write;
+    Si.hStdError = Write;
+    PROCESS_INFORMATION Pi = {};
+    bool32 Started = CreateProcessW(0, &Cmd[0], 0, 0, TRUE, CREATE_NO_WINDOW, 0, 0, &Si, &Pi);
+    CloseHandle(Write);
+    std::string Out;
+    char Buf[4096];
+    DWORD Got = 0;
+    while(Started && ReadFile(Read, Buf, sizeof(Buf), &Got, 0) && Got) { Out.append(Buf, Got); }
+    if(Started)
+    {
+        WaitForSingleObject(Pi.hProcess, 30000);
+        CloseHandle(Pi.hProcess);
+        CloseHandle(Pi.hThread);
+    }
+    CloseHandle(Read);
+    return Out;
+}
+
+// Visual Studio's x64 build environment for the tabs, so cl, link, cmake, ninja and msbuild work in
+// any shell: what vcvars64.bat of the newest install with the C++ tools changes, as a difference from
+// our own environment (set, put in front of, put after). Running it takes seconds, so the result is
+// kept in %LOCALAPPDATA%\clod\vsenv.txt and only run again when a Visual Studio folder it names is
+// gone (an update moved the tools). Nothing when there's no such install, or when we were started from
+// a developer prompt already (the tabs inherit that).
+static void LoadVsEnv(app_state& App)
+{
+    if(GetEnvironmentVariableW(L"VSINSTALLDIR", 0, 0)) { return; }
+    wchar_t Local[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", Local, MAX_PATH);
+    std::wstring CachePath = std::wstring(Local) + L"\\clod\\vsenv.txt";
+
+    // --- the cache: "set|pre|post <tab> NAME=value" lines, kept while every VS folder in it exists ---
+    std::string Cached = ReadWholeFile(CachePath);
+    bool32 Valid = !Cached.empty();
+    std::vector<std::wstring> Lists[3];
+    for(size_t At = 0; At < Cached.size() && Valid;)
+    {
+        size_t End = Cached.find('\n', At);
+        if(End == std::string::npos) { End = Cached.size(); }
+        std::string Line = Cached.substr(At, End - At);
+        At = End + 1;
+        while(!Line.empty() && Line.back() == '\r') { Line.pop_back(); }
+        size_t Tab = Line.find('\t');
+        if(Tab == std::string::npos) { continue; }
+        std::string Kind = Line.substr(0, Tab);
+        std::wstring Entry = Utf8ToWide(Line.substr(Tab + 1));
+        s32 List = (Kind == "set") ? 0 : (Kind == "pre") ? 1 : (Kind == "post") ? 2 : -1;
+        if(List < 0) { continue; }
+        Lists[List].push_back(Entry);
+        // Folders of Visual Studio named in a list value must still be there.
+        std::wstring Value = Entry.substr(Entry.find(L'=') + 1);
+        for(size_t P = 0; P < Value.size() && Valid;)
+        {
+            size_t Semi = Value.find(L';', P);
+            if(Semi == std::wstring::npos) { Semi = Value.size(); }
+            std::wstring Dir = Value.substr(P, Semi - P);
+            P = Semi + 1;
+            if(Dir.find(L"Microsoft Visual Studio") != std::wstring::npos && GetFileAttributesW(Dir.c_str()) == INVALID_FILE_ATTRIBUTES) { Valid = false; }
+        }
+    }
+
+    if(!Valid)
+    {
+        // --- find the newest install with the C++ x64 tools, run its vcvars64.bat, read back `set` ---
+        for(std::vector<std::wstring>& L : Lists) { L.clear(); }
+        wchar_t X86[MAX_PATH] = {};
+        if(!GetEnvironmentVariableW(L"ProgramFiles(x86)", X86, MAX_PATH)) { return; }
+        std::wstring Vswhere = std::wstring(X86) + L"\\Microsoft Visual Studio\\Installer\\vswhere.exe";
+        if(GetFileAttributesW(Vswhere.c_str()) == INVALID_FILE_ATTRIBUTES) { return; }
+        std::string Install = RunCapture(L"\"" + Vswhere + L"\" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath");
+        while(!Install.empty() && strchr("\r\n ", Install.back())) { Install.pop_back(); }
+        std::wstring Vcvars = Utf8ToWide(Install) + L"\\VC\\Auxiliary\\Build\\vcvars64.bat";
+        if(Install.empty() || GetFileAttributesW(Vcvars.c_str()) == INVALID_FILE_ATTRIBUTES) { return; }
+        // cmd /u writes `set`'s output as UTF-16.
+        std::string Raw = RunCapture(L"cmd.exe /d /u /c \"\"" + Vcvars + L"\" >nul 2>&1 && set\"");
+        std::wstring Text((const wchar_t*)Raw.data(), Raw.size() / sizeof(wchar_t));
+        for(size_t At = 0; At < Text.size();)
+        {
+            size_t End = Text.find(L'\n', At);
+            if(End == std::wstring::npos) { End = Text.size(); }
+            std::wstring Line = Text.substr(At, End - At);
+            At = End + 1;
+            while(!Line.empty() && Line.back() == L'\r') { Line.pop_back(); }
+            size_t Eq = Line.find(L'=');
+            if(Eq == std::wstring::npos || Eq == 0) { continue; }
+            std::wstring Name = Line.substr(0, Eq);
+            std::wstring New = Line.substr(Eq + 1);
+            DWORD Len = GetEnvironmentVariableW(Name.c_str(), 0, 0);
+            std::wstring Old(Len, 0);
+            if(Len) { Old.resize(GetEnvironmentVariableW(Name.c_str(), &Old[0], Len)); }
+            if(New == Old) { continue; }
+            size_t Pos = Old.empty() ? std::wstring::npos : New.find(Old);
+            if(Pos == std::wstring::npos) { Lists[0].push_back(Name + L"=" + New); continue; }
+            if(Pos > 0) { Lists[1].push_back(Name + L"=" + New.substr(0, Pos)); }
+            if(Pos + Old.size() < New.size()) { Lists[2].push_back(Name + L"=" + New.substr(Pos + Old.size())); }
+        }
+        std::string Out;
+        static const char* Kinds[3] = {"set", "pre", "post"};
+        for(s32 K = 0; K < 3; ++K) { for(const std::wstring& E : Lists[K]) { Out += std::string(Kinds[K]) + "\t" + WideToUtf8(E) + "\n"; } }
+        CreateDirectoryW((std::wstring(Local) + L"\\clod").c_str(), 0);
+        FILE* File = 0;
+        _wfopen_s(&File, CachePath.c_str(), L"wb");
+        if(File) { fwrite(Out.data(), 1, Out.size(), File); fclose(File); }
+    }
+    App.VsSet = Lists[0];
+    App.VsPrepend = Lists[1];
+    App.VsAppend = Lists[2];
 }
 
 // The prefix key from settings.txt ("prefix = alt+`", "prefix = ctrl+]"), or Alt+` when unset or unusable.
@@ -636,6 +776,7 @@ static int ServerMain()
         App.LaunchCwd = WideToUtf8(Home);
     }
     App.PrefixKey = LoadPrefixKey();
+    LoadVsEnv(App); // before the saved tabs start
     App.Sessions = ScanSessions(std::vector<session_info>());
 
     SeedUserSetup(); // first run: the user's own copy of the default shell setup and settings
