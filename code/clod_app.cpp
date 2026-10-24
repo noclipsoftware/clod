@@ -1530,7 +1530,14 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             // The left starts with the date and time (cell 1 stays blank: clodw draws its keep-active
             // light there), then the home screen's keys.
             s32 BX = 3;
-            if(!App.Clock.empty() && BX + TextWidth(App.Clock) < RightX) { BX = PutText(F, BX, Y, App.Clock, LabelStyle, W) + 3; }
+            if(!App.Clock.empty() && BX + TextWidth(App.Clock) < RightX)
+            {
+                // The date dim, the time bright (the server joins them with two spaces).
+                size_t Gap = App.Clock.find("  ");
+                std::string Date = (Gap == std::string::npos) ? std::string() : App.Clock.substr(0, Gap + 2);
+                BX = PutText(F, BX, Y, Date, LabelStyle, W);
+                BX = PutText(F, BX, Y, App.Clock.substr(Date.size()), Style(Ui(UI_BRIGHT), CmdBar.Bg, 0), W) + 3;
+            }
             // Whole entries only: the first one that doesn't fit ends the list.
             s32 ListEnd = (Right.empty() || Important) ? KeysEnd : RightX - 2;
             for(s32 I = 0; I + 1 < KeyCount; I += 2)
