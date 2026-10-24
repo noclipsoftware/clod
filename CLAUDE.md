@@ -101,7 +101,12 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
     icon gets a colored badge on a white logo. `AppsScanThread` (every 2 s while attached) reads
     explorer's tray toolbar buttons (`TB_GETBUTTON` into memory allocated in explorer; each
     button's data holds the owner window and the `HICON`) and calls an icon badged when 1 in 20
-    of its opaque pixels is strongly colored.
+    of its opaque pixels is strongly colored. clodw shows each as its exe's icon: Compose writes
+    `GLYPH_APP_ICON + k` over two cells and `frame::AppIcons` (in `MSG_CELLS`) names the exes; clodw
+    draws the icon into the glyph atlas as a color glyph (`SHDefExtractIcon`, WIC, Direct2D).
+    Console clients get the names. A click (`bar_hit::TrayApp`, `CMD_FOCUS_APP`) shows, restores and
+    brings up the app's main window (its titled `Chrome_WidgetWin_1`, hidden while in the tray);
+    clodw calls `AllowSetForegroundWindow` on that click, as the server is never in the foreground.
   - Opacity (`opacity = 85` in settings.txt, or the window menu's Opacity submenu, which saves it;
     20-100, missing = 100; new installs get 95 from the default `shell/settings.txt`): the swap chain goes through DirectComposition with premultiplied alpha
     (window has `WS_EX_NOREDIRECTIONBITMAP`), and only cells on the terminal's default background

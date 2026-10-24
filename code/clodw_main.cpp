@@ -29,6 +29,7 @@ struct clodw
     std::string Title;
     s32 ImagePane;         // pane + 1 showing the image `clod view` asked for; 0 = none
     std::string ImagePath; // that image, decoded into ImagePixels and the renderer
+    std::string AppIcons;  // msg_cells' exe list for GLYPH_APP_ICON cells (glyph_cache::Icons)
     std::vector<u32> ImagePixels;
     u32 ImageW;
     u32 ImageH;
@@ -414,6 +415,22 @@ static void Tick(clodw& C)
             At += H.TitleLen;
             std::string Image = Payload.substr(Min((s32)At, (s32)Payload.size()), H.ImagePathLen);
             At += H.ImagePathLen;
+            std::string Icons = Payload.substr(Min((s32)At, (s32)Payload.size()), H.AppIconsLen);
+            At += H.AppIconsLen;
+            if(Icons != C.AppIcons)
+            {
+                // Other tray apps' icons in the command bar: their glyphs are drawn again.
+                C.AppIcons = Icons;
+                C.G.Icons.clear();
+                for(size_t Start = 0, End = 0; (End = Icons.find('\n', Start)) != std::string::npos; Start = End + 1)
+                {
+                    std::wstring Wide(End - Start + 1, 0);
+                    Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Icons.data() + Start, (int)(End - Start), &Wide[0], (int)Wide.size()));
+                    C.G.Icons.push_back(Wide);
+                }
+                GlyphCacheReset(C.G);
+                C.Dirty = true;
+            }
             C.ImagePane = H.ImagePane;
             if(Image != C.ImagePath)
             {
@@ -944,6 +961,14 @@ static LRESULT CALLBACK ClodwWindowProc(HWND Window, UINT Msg, WPARAM W, LPARAM 
             s32 Cy = GET_Y_LPARAM(L) / Max(C->F.CellH, 1);
             if(C->MouseHeld || C->Selecting) { return 0; } // a second button during a drag
             if(C->HasSelection) { C->HasSelection = false; C->Dirty = true; }
+            // A tray app's icon in the command bar: the server brings that app's window up, which only
+            // the foreground window's process may allow.
+            if(Button == 0 && Cy >= 0 && Cy < C->GridH && Cx >= 0 && Cx < C->GridW)
+            {
+                const cell& K = C->Grid[(size_t)Cy * C->GridW + Cx];
+                u32 Cp = (K.Flags & CELL_WIDE_CONT) && Cx > 0 ? C->Grid[(size_t)Cy * C->GridW + Cx - 1].Codepoint : K.Codepoint;
+                if(Cp >= GLYPH_APP_ICON && Cp < GLYPH_APP_ICON + 16) { AllowSetForegroundWindow(ASFW_ANY); }
+            }
 
             // --- Ctrl+click opens the http/https link under the pointer (not file://: that could run a
             // program); the scan stays inside the pane ---

@@ -67,6 +67,10 @@ enum
     CELL_WIDE_CONT = 1 << 1, // second half, renders nothing itself
 };
 
+// Private-use codepoints the server writes for clodw to draw as pictures: GLYPH_APP_ICON + k is the
+// k-th tray app's icon in the command bar (frame::AppIcons), over two cells.
+#define GLYPH_APP_ICON 0x10FF00u
+
 // All-zero cell is a blank space in default colors.
 struct cell
 {

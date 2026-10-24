@@ -41,6 +41,7 @@ struct glyph_cache
     u32 TilesY;
     u32 NextX;
     u32 NextY;
+    std::vector<std::wstring> Icons; // exes whose icons GLYPH_APP_ICON + k draws
 };
 
 // Empties the cache (new font, or the atlas is full); glyphs get drawn again as they're needed.
@@ -194,6 +195,53 @@ static bool32 GlyphLookup(glyph_cache& G, font_state& F, renderer& R, const u32*
     // --- draw it with Direct2D, white on transparent, and copy its tiles into the atlas ---
     // A lone symbol asks for text presentation (U+FE0E), or fallback picks a color emoji. A glyph
     // wider than its cells (often from a fallback font) is scaled to fit.
+    // A tray app's icon (GLYPH_APP_ICON + k, in the command bar): the exe's own icon in its colors, a
+    // square a little under the cell height, centred in its cells.
+    if(Count == 1 && Cps[0] >= GLYPH_APP_ICON && Cps[0] - GLYPH_APP_ICON < (u32)G.Icons.size())
+    {
+        u32 Size = (u32)Max(1, (s32)(F.CellH * 0.85f));
+        HICON Icon = 0;
+        IWICImagingFactory* Wic = 0;
+        IWICBitmap* Bitmap = 0;
+        IWICFormatConverter* Converter = 0;
+        ID2D1Bitmap* Image = 0;
+        bool32 Ok = SUCCEEDED(SHDefExtractIconW(G.Icons[Cps[0] - GLYPH_APP_ICON].c_str(), 0, 0, &Icon, 0, Size)) && Icon;
+        Ok = Ok && SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Wic)));
+        Ok = Ok && SUCCEEDED(Wic->CreateBitmapFromHICON(Icon, &Bitmap));
+        Ok = Ok && SUCCEEDED(Wic->CreateFormatConverter(&Converter));
+        Ok = Ok && SUCCEEDED(Converter->Initialize(Bitmap, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, 0, 0.0, WICBitmapPaletteTypeCustom));
+        Ok = Ok && SUCCEEDED(R.Draw2D->CreateBitmapFromWicBitmap(Converter, 0, &Image));
+        R.Draw2D->BeginDraw();
+        R.Draw2D->Clear(D2D1::ColorF(0, 0, 0, 0));
+        if(Ok)
+        {
+            float X0 = floorf((Cells * F.CellW - (float)Size) / 2);
+            float Y0 = floorf((F.CellH - (float)Size) / 2);
+            R.Draw2D->DrawBitmap(Image, D2D1::RectF(X0, Y0, X0 + Size, Y0 + Size), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        }
+        R.Draw2D->EndDraw();
+        ReleaseCom(Image);
+        ReleaseCom(Converter);
+        ReleaseCom(Bitmap);
+        ReleaseCom(Wic);
+        if(Icon) { DestroyIcon(Icon); }
+        D3D11_BOX Src = {0, 0, 0, Cells * (UINT)F.CellW, (UINT)F.CellH, 1};
+        R.Context->CopySubresourceRegion(R.Atlas, 0, X * F.CellW, Y * F.CellH, 0, R.Scratch, 0, &Src);
+        glyph_entry& E = G.Table[Slot];
+        E.Cps[0] = Cps[0];
+        E.Count = 1;
+        E.Style = Style;
+        E.Cells = Cells;
+        E.Tile = X | (Y << 16);
+        E.Color = true;
+        E.Overflow = false;
+        G.Used += 1;
+        *Tile = E.Tile;
+        *Color = true;
+        *Overflow = false;
+        return true;
+    }
+
     bool32 IsColor = IsColorGlyph(Cps, Count);
     std::wstring Text;
     for(u32 I = 0; I < Count; ++I)

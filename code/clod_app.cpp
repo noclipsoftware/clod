@@ -59,6 +59,16 @@ struct bar_hit
     s32 X0;
     s32 X1;
     s32 Pane;
+    s32 Y;       // the row: 0 = the top bar, else the command bar
+    s32 TrayApp; // App.AppsWanting index + 1 (the command bar's app icons); 0 = none
+};
+
+// A tray app with unread messages (its notification-area icon has a badge).
+struct tray_app
+{
+    std::string Name; // the exe's name without .exe ("Slack")
+    std::string Path; // the exe, UTF-8: clodw draws its icon, a click brings its window up
+    bool operator==(const tray_app&) const = default;
 };
 
 // Panes split the area between the bars; each shows one tab (no tab in two panes) or the
@@ -141,7 +151,7 @@ struct app_state
     std::vector<std::wstring> VsPrepend; // put in front of the variable's own value (PATH, INCLUDE, ...)
     std::vector<std::wstring> VsAppend;  // put after it
     std::string Clock;  // local date and time for the command bar's left ("Thu Oct 23  2:05 PM"), set by the server
-    std::vector<std::string> AppsWanting; // tray apps whose icon has a badge ("Slack", "Discord"), set by the server
+    std::vector<tray_app> AppsWanting; // tray apps whose icon has a badge (Slack, Discord), set by the server
     std::vector<bar_hit> BarHits; // from the last composed frame
     bool32 Quit; // set by the server (tray Quit): stop, reopening the tabs with --resume next launch
 };
@@ -159,6 +169,7 @@ enum command_kind
     CMD_OPEN_FOLDER,   // new session in typed path Cwd, if it is a folder (closes the prompt)
     CMD_COMPLETE_FOLDER, // complete the last folder name in App.PathInput
     CMD_VIEW_STEP,     // Tab's image: show the one Step images on in its folder
+    CMD_FOCUS_APP,     // bring App.AppsWanting[Step]'s window to the front
 };
 
 struct app_command
@@ -1004,7 +1015,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 {
                     for(const bar_hit& H : App.BarHits)
                     {
-                        if(K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
+                        if(H.Y != 0 || K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
                         if(H.Pane <= -2) { GoToPage(App, -2 - H.Pane); }
                         else if(H.Pane < 0) { App.HomeOpen = true; }
                         else { FocusPane(App, H.Pane); }
@@ -1013,8 +1024,19 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 continue;
             }
 
-            // The command bar row belongs to clod.
-            if(Row > ContentRows(App.Height)) { continue; }
+            // The command bar row belongs to clod: a click on a tray app's icon or name brings it up.
+            if(Row > ContentRows(App.Height))
+            {
+                for(const bar_hit& H : App.BarHits)
+                {
+                    if(!LeftPress || H.Y != Row || !H.TrayApp || K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
+                    app_command Focus = {};
+                    Focus.Kind = CMD_FOCUS_APP;
+                    Focus.Step = H.TrayApp - 1;
+                    Cmds.push_back(Focus);
+                }
+                continue;
+            }
 
             // --- the pane: under the pointer, except that a drag stays in the pane it began in ---
             s32 Col = K.MouseX - 1;
@@ -1297,6 +1319,7 @@ struct frame
     u32 PaneMouseTaken;          // bit per pane: clod or the program there handles the mouse, so a plain drag isn't a selection
     s32 ImagePane;               // pane + 1 whose image the window draws over the cells (WindowDrawsImages); 0 = none
     std::string ImagePath;
+    std::string AppIcons;        // exe paths, a newline after each: cell codepoint GLYPH_APP_ICON + k is the k-th's icon (clodw)
 };
 
 static cell Style(u32 Fg, u32 Bg, u16 Attr)
@@ -1360,6 +1383,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
     F.PaneMouseTaken = 0;
     F.ImagePane = 0;
     F.ImagePath.clear();
+    F.AppIcons.clear();
     Hits.clear();
     if(W <= 0 || H <= 0) { return; }
 
@@ -1539,12 +1563,36 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 BX = PutText(F, BX, Y, Date, LabelStyle, W);
                 BX = PutText(F, BX, Y, App.Clock.substr(Date.size()), Style(Ui(UI_BRIGHT), CmdBar.Bg, 0), W) + 3;
             }
-            // Then the tray apps with unread messages (their icon has a badge), so a glance says they want you.
-            for(const std::string& Name : App.AppsWanting)
+            // Then the tray apps with unread messages (their icon has a badge), so a glance says they
+            // want you; a click brings one up. clodw draws each app's icon over two cells, console
+            // clients get its name.
+            for(s32 K = 0; K < (s32)App.AppsWanting.size(); ++K)
             {
-                if(BX + TextWidth(Name) >= RightX) { break; }
-                BX = PutText(F, BX, Y, Name, Style(Ui(UI_NOTE), CmdBar.Bg, 0), W) + 3;
+                const tray_app& A = App.AppsWanting[K];
+                s32 X0 = BX;
+                if(App.WindowDrawsImages)
+                {
+                    if(BX + 2 >= RightX || K >= 16) { break; }
+                    cell Icon = Style(Ui(UI_NOTE), CmdBar.Bg, 0);
+                    Icon.Codepoint = GLYPH_APP_ICON + (u32)K;
+                    Icon.Flags = CELL_WIDE;
+                    F.Cells[(size_t)Y * W + BX] = Icon;
+                    cell Cont = Style(Ui(UI_NOTE), CmdBar.Bg, 0);
+                    Cont.Flags = CELL_WIDE_CONT;
+                    F.Cells[(size_t)Y * W + BX + 1] = Cont;
+                    F.AppIcons += A.Path + "\n";
+                    BX += 2;
+                }
+                else
+                {
+                    if(BX + TextWidth(A.Name) >= RightX) { break; }
+                    BX = PutText(F, BX, Y, A.Name, Style(Ui(UI_NOTE), CmdBar.Bg, 0), W);
+                }
+                bar_hit Hit = {X0, BX, 0, Y, K + 1};
+                Hits.push_back(Hit);
+                BX += App.WindowDrawsImages ? 1 : 3;
             }
+            if(App.WindowDrawsImages && !App.AppsWanting.empty()) { BX += 2; }
             // Whole entries only: the first one that doesn't fit ends the list.
             s32 ListEnd = (Right.empty() || Important) ? KeysEnd : RightX - 2;
             for(s32 I = 0; I + 1 < KeyCount; I += 2)

@@ -21,7 +21,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a client from another build is turned away
 // with a clear message instead of misreading the stream.
-#define CLOD_PROTOCOL_VERSION 7
+#define CLOD_PROTOCOL_VERSION 8
 
 struct msg_attach
 {
@@ -54,6 +54,7 @@ struct msg_cells
     u32 PaneMouseTaken; // bit per pane: the program there (or the home screen) takes the mouse
     s32 ImagePane;      // pane + 1 showing an image file (`clod view`) the client draws itself; 0 = none
     u32 ImagePathLen;   // its UTF-8 path follows the title
+    u32 AppIconsLen;    // then frame::AppIcons: the exes whose icons GLYPH_APP_ICON + k cells show
     u32 TitleLen;
     u32 RowCount;
 };

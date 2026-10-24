@@ -113,10 +113,10 @@ static DWORD WINAPI SessionsScanThread(void* Param)
 // "slack discord", "off" = none) want a look while their notification-area icon has a badge, a
 // colored dot on an otherwise white icon. Neither app says so anywhere else (their window titles
 // don't change), so this asks explorer for its tray buttons and reads their icons: on its own
-// thread, since explorer may be slow to answer. Wanting out (exe names as written, setting order).
+// thread, since explorer may be slow to answer. Wanting out (in the setting's order).
 struct apps_scan
 {
-    std::vector<std::string> Wanting;
+    std::vector<tray_app> Wanting;
     HANDLE Wake;
     volatile LONG Done;
 };
@@ -134,7 +134,7 @@ static DWORD WINAPI AppsScanThread(void* Param)
         if(End > At) { Apps.push_back(Setting.substr(At, End - At)); }
         At = End + 1;
     }
-    std::vector<std::string> Badged; // exe names without .exe
+    std::vector<tray_app> Badged;
     // The tray's buttons live in toolbars: under TrayNotifyWnd (Windows 11, hidden icons included),
     // its SysPager (Windows 10) and the overflow window's (Windows 10's hidden icons). A missing
     // parent is skipped: FindWindowEx with none would search the top-level windows.
@@ -205,16 +205,16 @@ static DWORD WINAPI AppsScanThread(void* Param)
             ReleaseDC(0, Dc);
             if(Info.hbmColor) { DeleteObject(Info.hbmColor); }
             if(Info.hbmMask) { DeleteObject(Info.hbmMask); }
-            if(Opaque && Colored * 20 >= Opaque) { Badged.push_back(Exe); }
+            if(Opaque && Colored * 20 >= Opaque) { Badged.push_back(tray_app{Exe, WideToUtf8(Path)}); }
         }
         if(Remote) { VirtualFreeEx(Explorer, Remote, 0, MEM_RELEASE); }
         if(Explorer) { CloseHandle(Explorer); }
     }
     for(const std::string& A : Apps)
     {
-        for(const std::string& Exe : Badged)
+        for(const tray_app& T : Badged)
         {
-            if(_stricmp(A.c_str(), Exe.c_str()) == 0) { S->Wanting.push_back(Exe); break; }
+            if(_stricmp(A.c_str(), T.Name.c_str()) == 0) { S->Wanting.push_back(T); break; }
         }
     }
     InterlockedExchange(&S->Done, 1);
@@ -682,7 +682,8 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
     bool32 CursorChanged = Full || Prev.CursorHidden != Next.CursorHidden || Prev.CursorX != Next.CursorX || Prev.CursorY != Next.CursorY ||
                            Prev.CursorShape != Next.CursorShape;
     bool32 PanesChanged = Prev.PaneCount != Next.PaneCount || memcmp(Prev.Panes, Next.Panes, sizeof(Next.Panes)) != 0 ||
-                          Prev.PaneMouseTaken != Next.PaneMouseTaken || Prev.ImagePane != Next.ImagePane || Prev.ImagePath != Next.ImagePath;
+                          Prev.PaneMouseTaken != Next.PaneMouseTaken || Prev.ImagePane != Next.ImagePane || Prev.ImagePath != Next.ImagePath ||
+                          Prev.AppIcons != Next.AppIcons;
     if(!RowCount && !CursorChanged && !TitleChanged && !PanesChanged) { return false; }
 
     msg_cells H = {};
@@ -705,11 +706,13 @@ static bool32 EncodeCells(std::string& Out, const frame& Prev, const frame& Next
     H.PaneMouseTaken = Next.PaneMouseTaken;
     H.ImagePane = Next.ImagePane;
     H.ImagePathLen = (u32)Next.ImagePath.size();
+    H.AppIconsLen = (u32)Next.AppIcons.size();
     H.TitleLen = (u32)Title.size();
     H.RowCount = RowCount;
     Out.append((const char*)&H, sizeof(H));
     Out += Title;
     Out += Next.ImagePath;
+    Out += Next.AppIcons;
     Out += Rows;
     return true;
 }
@@ -1291,6 +1294,37 @@ static int ServerMain()
                 } break;
                 case CMD_CLOSE: CloseTab(App, C.Tab); break;
                 case CMD_VIEW_STEP: if(!C.Tab->ViewImage.empty()) { ViewImageAt(App, *C.Tab, C.Tab->ViewImage, C.Step, NowMs); } break;
+                case CMD_FOCUS_APP:
+                {
+                    // The app's main window (Electron's, with a title; hidden while it sits in the tray):
+                    // shown, restored and brought to the front. The clicking window allowed the switch
+                    // (AllowSetForegroundWindow), since this server is never in the foreground itself.
+                    if(C.Step < 0 || C.Step >= (s32)App.AppsWanting.size()) { break; }
+                    struct find_app { std::wstring Path; HWND Visible; HWND Hidden; };
+                    find_app Find = {Utf8ToWide(App.AppsWanting[C.Step].Path), 0, 0};
+                    EnumWindows([](HWND Wnd, LPARAM Param) -> BOOL
+                    {
+                        find_app& F = *(find_app*)Param;
+                        wchar_t Class[64] = {};
+                        GetClassNameW(Wnd, Class, ArrayCount(Class));
+                        if(wcscmp(Class, L"Chrome_WidgetWin_1") != 0 || GetWindow(Wnd, GW_OWNER) || !GetWindowTextLengthW(Wnd)) { return TRUE; }
+                        DWORD Pid = 0;
+                        GetWindowThreadProcessId(Wnd, &Pid);
+                        HANDLE Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+                        wchar_t Path[MAX_PATH] = {};
+                        DWORD PathLen = MAX_PATH;
+                        if(Process) { QueryFullProcessImageNameW(Process, 0, Path, &PathLen); CloseHandle(Process); }
+                        if(_wcsicmp(Path, F.Path.c_str()) != 0) { return TRUE; }
+                        if(IsWindowVisible(Wnd)) { F.Visible = Wnd; return FALSE; }
+                        if(!F.Hidden) { F.Hidden = Wnd; }
+                        return TRUE;
+                    }, (LPARAM)&Find);
+                    HWND Wnd = Find.Visible ? Find.Visible : Find.Hidden;
+                    if(!Wnd) { break; }
+                    if(!IsWindowVisible(Wnd)) { ShowWindow(Wnd, SW_SHOW); }
+                    if(IsIconic(Wnd)) { ShowWindow(Wnd, SW_RESTORE); }
+                    SetForegroundWindow(Wnd);
+                } break;
                 case CMD_RESCAN:
                 {
                     App.Sessions = ScanSessions(App.Sessions);
