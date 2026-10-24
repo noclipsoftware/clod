@@ -118,6 +118,7 @@ struct app_state
     std::string Filter;
     bool32 FilterEditing;
     s32 Selected; // home screen: 0..Tabs-1 = a running tab, then the filtered sessions
+    bool32 SessionsShown; // the home screen lists the Claude Code sessions (s, a filter); else one line
     s32 ListScroll;
 
     u32 PrefixKey;      // the key that goes home / back (settings "prefix"; default Alt+`): a control byte, or PREFIX_ALT | a character
@@ -523,7 +524,16 @@ static tab* HomeSelectedTab(const app_state& App)
     return 0;
 }
 
-static s32 HomeSessionsRow(const app_state& App) { return Max((s32)HomeRows(App).size(), 1) + 2; }
+// The home screen sits a row down and two columns in from its pane's edges.
+#define HOME_TOP 1
+#define HOME_LEFT 2
+
+// The Claude Code sessions are listed when asked for (s, a filter), or when nothing runs yet.
+static bool32 HomeSessionsOpen(const app_state& App) { return App.SessionsShown || App.Tabs.empty(); }
+
+// Below the running tabs and their keys row: a blank row, the pages row and another blank row when
+// there are pages, then the sessions.
+static s32 HomeSessionsRow(const app_state& App) { return HOME_TOP + Max((s32)HomeRows(App).size(), 1) + 2 + (App.Pages.size() > 1 ? 2 : 0); }
 static s32 HomeListRow(const app_state& App) { return HomeSessionsRow(App) + 3; }
 static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH - HomeListRow(App)); }
 
@@ -532,7 +542,7 @@ static s32 HomeListRows(const app_state& App, s32 PaneH) { return Max(1, PaneH -
 static void HomeMoveSelection(app_state& App, s32 Delta)
 {
     s32 Running = (s32)App.Tabs.size();
-    s32 Count = Running + (s32)FilterSessions(App).size();
+    s32 Count = Running + (HomeSessionsOpen(App) ? (s32)FilterSessions(App).size() : 0);
     App.Selected = Clamp(App.Selected + Delta, 0, Max(0, Count - 1));
     s32 Rows = HomeListRows(App, PaneRect(App, App.Focus).H);
     s32 S = App.Selected - Running; // in the sessions list
@@ -1035,14 +1045,16 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size(); ++Ri)
                 {
                     if(Rows[Ri] < 0) { continue; }
-                    if(Ri == Y - 1) { Clicked = Pos; }
+                    if(Ri == Y - 1 - HOME_TOP) { Clicked = Pos; }
                     Pos += 1;
                 }
                 s32 ListRow = HomeListRow(App);
-                if(Y - 1 >= ListRow && Y - 1 < ListRow + HomeListRows(App, R.H) && App.ListScroll + (Y - 1 - ListRow) < (s32)FilterSessions(App).size())
+                bool32 Open = HomeSessionsOpen(App);
+                if(Open && Y - 1 >= ListRow && Y - 1 < ListRow + HomeListRows(App, R.H) && App.ListScroll + (Y - 1 - ListRow) < (s32)FilterSessions(App).size())
                 {
                     Clicked = Running + App.ListScroll + (Y - 1 - ListRow);
                 }
+                if(!Open && LeftPress && Y - 1 == HomeSessionsRow(App)) { App.SessionsShown = true; continue; } // the folded line opens
                 if(Wheel) { HomeMoveSelection(App, (Button & 1) ? 3 : -3); }
                 else if(LeftPress && Clicked >= 0)
                 {
@@ -1128,7 +1140,12 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             else if(K.Kind == KEY_CHAR && K.Mods == 0)
             {
                 u32 C = K.Codepoint;
-                if(C == '/') { App.FilterEditing = true; }
+                if(C == '/') { App.FilterEditing = true; App.SessionsShown = true; }
+                else if(C == 's')
+                {
+                    App.SessionsShown = !App.SessionsShown;
+                    if(!HomeSessionsOpen(App)) { App.Selected = Clamp(App.Selected, 0, Max(Running - 1, 0)); }
+                }
                 else if(C == 'k') { HomeMoveSelection(App, -1); }
                 else if(C == 'j') { HomeMoveSelection(App, 1); }
                 else if(C >= '1' && C <= '9') { SwitchTab(App, (s32)(C - '0')); }
@@ -1474,7 +1491,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             static const char* HomeKeys[] = {
                 "Enter", "show here", "1-9", "show N", "\xE2\x86\x90\xE2\x86\x92", "pane", "x", "close", "R", "restart",
-                "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
+                "s", "sessions", "/", "filter", "m", "mouse", "r", "rescan", "q", "detach",
             };
             const char** Keys = HomeKeys;
             s32 KeyCount = Active ? 0 : (s32)ArrayCount(HomeKeys); // in a tab the left stays empty
@@ -1639,18 +1656,21 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             continue;
         }
 
-        // --- home screen: the running tabs in sections, keys for new ones, then the Claude Code sessions ---
+        // --- home screen: the running tabs in sections, keys for new ones, then the Claude Code sessions
+        // (folded to one line until asked for), a row down and two columns in from the pane's edges ---
         std::vector<s32> Rows = HomeRows(App);
         s32 Bottom = Top + PR.H; // rows below belong to other panes or the command bar
+        s32 RowsTop = Top + HOME_TOP;
+        Left += HOME_LEFT;
         cell KeyText = Style(Ui(UI_BRIGHT), 0, ATTR_BOLD);
-        if(Rows.empty()) { PutText(F, Left + 1, Top, "Nothing running yet.", Dim, Right); }
+        if(Rows.empty()) { PutText(F, Left + 1, RowsTop, "Nothing running yet.", Dim, Right); }
         s32 NameX = Left + 5;
         s32 NameW = Clamp(PW / 3, 12, 40);
         s32 StatusX = NameX + NameW + 2;
         s32 CwdX = StatusX + 16;
-        for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size() && Top + Ri < Bottom; ++Ri)
+        for(s32 Ri = 0, Pos = 0; Ri < (s32)Rows.size() && RowsTop + Ri < Bottom; ++Ri)
         {
-            s32 Y = Top + Ri;
+            s32 Y = RowsTop + Ri;
             if(Rows[Ri] < 0)
             {
                 // --- a section heading and how many it holds ---
@@ -1692,7 +1712,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         {
             static const char* NewKeys[] = {"t", "new shell", "n", "new claude", "N", "new in project", "o", "new in folder"};
             s32 KX = Left + 5;
-            s32 KY = Top + Max((s32)Rows.size(), 1);
+            s32 KY = RowsTop + Max((s32)Rows.size(), 1);
             for(u32 I = 0; I + 1 < ArrayCount(NewKeys) && KY < Bottom; I += 2)
             {
                 if(KX + TextWidth(NewKeys[I]) + 1 + TextWidth(NewKeys[I + 1]) > Right) { break; }
@@ -1701,10 +1721,10 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
             }
         }
         {
-            // --- the pages, on the row under those keys: numbers (the current one in the accent),
-            // then their keys ---
-            s32 GY = Top + Max((s32)Rows.size(), 1) + 1;
-            if(GY < Bottom)
+            // --- the pages, on the row under those keys, when there's more than one: numbers (the
+            // current one in the accent), then their keys ---
+            s32 GY = RowsTop + Max((s32)Rows.size(), 1) + 2;
+            if(GY < Bottom && PageCount(App) > 1)
             {
                 s32 GX = PutText(F, Left + 1, GY, "Pages", Style(0, 0, ATTR_BOLD), Right) + 2;
                 for(s32 G = 0; G < PageCount(App); ++G)
@@ -1723,10 +1743,26 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
         }
 
         s32 ST = Top + HomeSessionsRow(App);
-        if(ST + 3 > Bottom) { continue; } // no room for the sessions list
         std::vector<s32> Filtered = FilterSessions(App);
+        if(!HomeSessionsOpen(App))
+        {
+            if(ST < Bottom)
+            {
+                s32 HX = PutText(F, Left + 1, ST, "Claude Code sessions", Style(0, 0, ATTR_BOLD), Right);
+                HX = PutText(F, HX + 2, ST, std::to_string(App.Sessions.size()), Dim, Right);
+                HX = PutText(F, HX + 3, ST, "s", KeyText, Right);
+                PutText(F, HX, ST, " show", Dim, Right);
+            }
+            continue;
+        }
+        if(ST + 3 > Bottom) { continue; } // no room for the sessions list
         s32 HX = PutText(F, Left + 1, ST, "Claude Code sessions", Style(0, 0, ATTR_BOLD), Right);
-        PutText(F, HX + 2, ST, std::to_string(Filtered.size()) + (App.Filter.empty() ? "" : " of " + std::to_string(App.Sessions.size())), Dim, Right);
+        HX = PutText(F, HX + 2, ST, std::to_string(Filtered.size()) + (App.Filter.empty() ? "" : " of " + std::to_string(App.Sessions.size())), Dim, Right);
+        if(!App.Tabs.empty())
+        {
+            HX = PutText(F, HX + 3, ST, "s", KeyText, Right);
+            HX = PutText(F, HX, ST, " hide", Dim, Right);
+        }
         std::string Launch = "new ones start in " + HomeCwd(App);
         if(Right - (HX + 16) >= TextWidth(Launch) + 1) { PutText(F, Right - TextWidth(Launch) - 1, ST, Launch, Dim, Right); }
 

@@ -172,14 +172,17 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   remembered (`App.CameFrom`). On the home screen clod takes every key, single letters with no
   prefix: Enter/1-9 show a tab here, ←/→/Tab move to another pane, `t`/`n`/`N`/`o` start new ones
   (in `HomeCwd`: the remembered tab's folder), `x` close, `R` restart, `/`
-  filter, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
+  filter, `s` show/fold the sessions, `m` mouse capture, `r` rescan, `q` detach; Esc or the prefix go back to the remembered tab.
   There is no armed-prefix state and no prefix + key chords.
 - The home screen (the prefix, clodw Ctrl+Shift+Space or Ctrl+Shift+S, clicking the top bar's
   counts) is where a pane picks what it shows: the running tabs in sections like Claude's agents
   view (`HomeRows`/`TabSection`): Needs input (claude rang or sent OSC 9/777, `tab::NeedsInput`,
   cleared by typing into it or a new turn), Working (title spinner), Completed (idle claude),
   Shells (no claude); each row has number, name, a notice or what a shell runs, folder (`x`
-  closes the selected one). Then keys for new ones, then the Claude Code sessions. One selection (`App.Selected`) runs through both lists; only the focused pane's home
+  closes the selected one). Then keys for new ones, a blank row, the Pages row (only with more than
+  one page) and another blank row, then the Claude Code sessions: folded to one line ("s show")
+  until `s` or a filter (`/`) opens them (`App.SessionsShown`, `HomeSessionsOpen`; always open
+  while nothing runs). The whole screen sits `HOME_TOP` rows down and `HOME_LEFT` columns in. One selection (`App.Selected`) runs through both lists; only the focused pane's home
   shows it. The sessions list is re-read every 5 s while a window is attached
   (`SessionsScanThread`; `ScanSessions` reuses `Known` entries for transcripts with the same
   write time and size), keeping the selection on the same session. A tab that wants a look while no pane shows it (claude finished, a bell, OSC 9) gets a
