@@ -155,6 +155,9 @@ static u32 PackHex(u32 Hex) { return PackRgb((Hex >> 16) & 255, (Hex >> 8) & 255
 // A cell color (clod_base.h tags) as a packed RGB in theme T; untagged = DefaultHex.
 static u32 ResolveColor(u32 C, u32 DefaultHex, const theme& T)
 {
+    // Good and bad (the task view's verdicts) are the theme's own green and red.
+    if(C == Ui(UI_GOOD)) { return PackHex(T.Ansi[2]); }
+    if(C == Ui(UI_BAD)) { return PackHex(T.Ansi[1]); }
     if(COLOR_TAG(C) == COLOR_RGB || COLOR_TAG(C) == COLOR_UI)
     {
         return PackHex(COLOR_TAG(C) == COLOR_RGB ? C & 0xFFFFFF : T.Ui[Min((s32)(C & 255), UI_COUNT - 1)]);
@@ -1356,6 +1359,7 @@ static int WindowMain(s32 JumpToTab)
                 const char* Command = 0;
                 char PageSeq[16] = {};
                 if(Ctrl && !Alt && Msg.wParam == VK_TAB) { Command = Shift ? "\x1b[5;5~" : "\x1b[6;5~"; }
+                else if(Alt && !Ctrl && !Shift && Msg.wParam == VK_RETURN) { Command = "\x1b[7779~"; } // the task view (ESC CR is Shift+Enter's)
                 else if(Ctrl && Alt && !Shift && Msg.wParam >= '1' && Msg.wParam <= '9')
                 {
                     // Ctrl+Alt+1-9: go to that page (CSI 7778 ; N ~, clod's own).

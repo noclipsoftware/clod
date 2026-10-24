@@ -187,7 +187,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   and closes it, Esc closes it. On home: Enter/1-9 go to a tab (`SwitchTab`: the page and pane
   showing it come up focused; a tab no pane shows comes into the focused pane), `t`/`n`/`N`/`o`
   start new ones into the focused pane (in `HomeCwd`: the focused tab's folder), `x` close, `R`
-  restart, `/` filter, `s` show/fold the sessions, `m` mouse capture, `r` rescan, `q` detach.
+  restart, `/` filter, `s` show/fold the sessions, `l` the task view, `m` mouse capture, `r`
+  rescan, `q` detach.
   The filter is a quick tab switcher: its line sits at the top (`HomeTabsTop`), each key narrows
   the running tabs (name, folder, session id; `HomeRows`) and the sessions, and selects the first
   match, a tab before any session, so Enter goes straight to it. `HomeTabCount` is where the
@@ -208,6 +209,25 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `tab::Notice`, shown there and counted in the top bar until a pane shows it. Its "new output" (`tab::Activity`)
   means output off screen that added lines or moved the cursor to another row: clink redrawing
   its prompt in place (git status arriving) and ConPTY's repaint after a resize don't count.
+- The task view (`App.TasksOpen`, a layer like home, never both; clodw's Alt+Enter or home's `l`
+  open it, Alt+Enter or the prefix leave): a card per claude tab (`TaskTabs`: needing input, working,
+  idle), each with a mark, its name, state and CPU, its last prompt, while working its step
+  (`Bash · <description>`), and its oldest unread report (`1/n`, verdict mark, age, two rows at most).
+  The selected card (`TaskSelected`; Alt+Up/Down, click) adds the bottom of its live screen beside
+  an accent rule; every other key goes to that claude, so prompts are answered and it's talked to in
+  its own input box. Alt+D or a click on the report dismisses it (the only way one is read).
+  - Prompt and step come from the transcript (`FindTranscript`: `projects\*\<id>.jsonl`, kept in
+    `tab::TranscriptPath`; `LookAtTranscript` reads the last 512 KB): every second while the view is
+    open (`TasksScanThread`).
+  - Each busy-to-idle edge (claude stopping, at the end of a step or of the work) queues a report
+    (`ReportQueue`, 2 s later so its words are written; `task_summaries = off` in settings.txt stops
+    them). `ReportThread`, one at a time, puts the prompt and what claude wrote since its turn began
+    to `claude -p --model haiku --no-session-persistence --strict-mcp-config --setting-sources project`
+    (stdin, `RunCapture`; in `%LOCALAPPDATA%\clod`, without `ClaudeMarkers`; ~5 s), asking for
+    `success|mixed|failed|progress: <the one thing to know>`; into `tab::Reports` (unread, at most 20).
+    A reply out of shape keeps claude's own first 200 characters, no verdict. Not kept across restarts.
+  - Verdict colors are `UI_GOOD`/`UI_BAD`, past `UI_COUNT`: clodw takes the theme's green and red,
+    console clients palette 2 and 1.
 - Alt+\ (unless it's the prefix) goes round the tabs that want you, wherever they are, as one ring:
   claudes that need input (longest waiting first, `tab::WantsSinceMs`, set when it starts needing
   input or gets a notice), then tabs with a notice (longest first), then working claudes (tab
@@ -331,7 +351,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   don't fit); in a tab its left side is empty and the right shows only a grey "Alt+` home"
   (status and scroll position take that spot when present). clodw adds direct shortcuts: Ctrl+Tab
   sends Ctrl+PgDn/PgUp, Ctrl+Shift+T/N/O/W/S/Space send CSI 7777 ~ (`KEY_GO_HOME`: home, never
-  back) plus the home key (`t`, `n`, `o`, `x`).
+  back) plus the home key (`t`, `n`, `o`, `x`), Alt+Enter sends CSI 7779 ~ (`KEY_TASKS`, the task
+  view; not ESC CR, which is clodw's Shift+Enter).
 - The top bar shows **only** the name of what each top pane shows (above it; the focused one in
   the accent; lower panes' names sit on their rule) and, on the right, the tabs by the home
   screen's sections ("1 needs input · 2 working · 3 completed · 1 shell", else "7 running" when

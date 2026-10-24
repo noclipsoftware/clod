@@ -21,6 +21,15 @@ static std::wstring FindClaude()
     return std::wstring();
 }
 
+// The environment markers a parent Claude Code session leaves behind. A claude that inherits them
+// thinks it's a subagent (e.g. it stops saving its transcript), so tabs and the task view's report
+// writer start without them.
+static const wchar_t* ClaudeMarkers[] = {
+    L"CLAUDECODE", L"CLAUDE_CODE_CHILD_SESSION", L"CLAUDE_CODE_SESSION_ID", L"CLAUDE_CODE_SESSION_ATTENDED",
+    L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
+    L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
+};
+
 static std::string NewUuid()
 {
     u32 R[4] = {};
@@ -393,13 +402,9 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
     // cmd strips the outer quotes of a /k string that holds more than one quoted part.
     std::wstring Cmd = std::wstring(L"\"") + Exe + L"\"" + (Inner.empty() ? std::wstring() : L" /k \"" + Inner + L"\"");
 
-    // --- environment: drop the markers a parent Claude Code session leaves behind ---
-    // Inheriting them makes the child think it's a subagent (e.g. it stops saving its transcript).
+    // --- environment: drop the markers a parent Claude Code session leaves behind (ClaudeMarkers) ---
     // Inherited clink config locations are dropped, so another clink setup never leaks into clod's.
     static const wchar_t* Strip[] = {
-        L"CLAUDECODE", L"CLAUDE_CODE_CHILD_SESSION", L"CLAUDE_CODE_SESSION_ID", L"CLAUDE_CODE_SESSION_ATTENDED",
-        L"CLAUDE_CODE_ENTRYPOINT", L"CLAUDE_CODE_EXECPATH", L"CLAUDE_CODE_MESSAGING_SOCKET",
-        L"CLAUDE_CODE_MESSAGING_TOKEN", L"CLAUDE_PID", L"AI_AGENT",
         L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"CLOD_DIR",
     };
     std::wstring Env;
@@ -412,6 +417,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, app_
         size_t NameLen = Eq ? (size_t)(Eq - Var) : wcslen(Var);
         bool32 Drop = false;
         for(const wchar_t* S : Strip) { if(wcslen(S) == NameLen && _wcsnicmp(Var, S, NameLen) == 0) { Drop = true; } }
+        for(const wchar_t* S : ClaudeMarkers) { if(wcslen(S) == NameLen && _wcsnicmp(Var, S, NameLen) == 0) { Drop = true; } }
         if(Drop) { continue; }
         // Visual Studio's build environment changes this one: set, or put around its own value.
         std::wstring Entry = Var;
@@ -492,29 +498,53 @@ static void CloseTab(app_state& App, tab* T)
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
 }
 
-// A program's whole output (stdout and stderr), run hidden; empty if it can't start.
-static std::string RunCapture(std::wstring Cmd)
+// A program's whole output (stdout and stderr), run hidden; empty if it can't start. Input goes to
+// its stdin; Env (a block of "NAME=value\0" entries) replaces our environment when given; Dir is its
+// folder (empty = ours). A program still running after TimeoutMs is ended, with what it wrote so far.
+static std::string RunCapture(std::wstring Cmd, const std::string& Input, const std::wstring& Env, const std::wstring& Dir, u32 TimeoutMs)
 {
     SECURITY_ATTRIBUTES Sa = {sizeof(Sa), 0, TRUE};
     HANDLE Read = 0;
     HANDLE Write = 0;
+    HANDLE InRead = 0;
+    HANDLE InWrite = 0;
     if(!CreatePipe(&Read, &Write, &Sa, 0)) { return std::string(); }
+    if(!CreatePipe(&InRead, &InWrite, &Sa, 1 << 16)) { CloseHandle(Read); CloseHandle(Write); return std::string(); }
     SetHandleInformation(Read, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(InWrite, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW Si = {};
     Si.cb = sizeof(Si);
     Si.dwFlags = STARTF_USESTDHANDLES;
+    Si.hStdInput = InRead;
     Si.hStdOutput = Write;
     Si.hStdError = Write;
     PROCESS_INFORMATION Pi = {};
-    bool32 Started = CreateProcessW(0, &Cmd[0], 0, 0, TRUE, CREATE_NO_WINDOW, 0, 0, &Si, &Pi);
+    bool32 Started = CreateProcessW(0, &Cmd[0], 0, 0, TRUE, CREATE_NO_WINDOW | (Env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                                    Env.empty() ? 0 : (void*)Env.data(), Dir.empty() ? 0 : Dir.c_str(), &Si, &Pi);
     CloseHandle(Write);
+    CloseHandle(InRead);
+    DWORD Wrote = 0;
+    if(Started && !Input.empty()) { WriteFile(InWrite, Input.data(), (DWORD)Input.size(), &Wrote, 0); }
+    CloseHandle(InWrite);
+    // --- read until it exits (or runs out of time); a child it started may hold the pipe open longer ---
     std::string Out;
     char Buf[4096];
-    DWORD Got = 0;
-    while(Started && ReadFile(Read, Buf, sizeof(Buf), &Got, 0) && Got) { Out.append(Buf, Got); }
+    u64 StartMs = GetTickCount64();
+    while(Started)
+    {
+        DWORD Avail = 0;
+        DWORD Got = 0;
+        if(!PeekNamedPipe(Read, 0, 0, 0, &Avail, 0)) { break; } // closed: everything's read
+        if(Avail && ReadFile(Read, Buf, Min((s32)Avail, (s32)sizeof(Buf)), &Got, 0)) { Out.append(Buf, Got); continue; }
+        if(WaitForSingleObject(Pi.hProcess, 50) == WAIT_OBJECT_0)
+        {
+            while(PeekNamedPipe(Read, 0, 0, 0, &Avail, 0) && Avail && ReadFile(Read, Buf, Min((s32)Avail, (s32)sizeof(Buf)), &Got, 0)) { Out.append(Buf, Got); }
+            break;
+        }
+        if(GetTickCount64() - StartMs > TimeoutMs) { TerminateProcess(Pi.hProcess, 1); break; }
+    }
     if(Started)
     {
-        WaitForSingleObject(Pi.hProcess, 30000);
         CloseHandle(Pi.hProcess);
         CloseHandle(Pi.hThread);
     }
@@ -573,12 +603,12 @@ static void LoadVsEnv(app_state& App)
         if(!GetEnvironmentVariableW(L"ProgramFiles(x86)", X86, MAX_PATH)) { return; }
         std::wstring Vswhere = std::wstring(X86) + L"\\Microsoft Visual Studio\\Installer\\vswhere.exe";
         if(GetFileAttributesW(Vswhere.c_str()) == INVALID_FILE_ATTRIBUTES) { return; }
-        std::string Install = RunCapture(L"\"" + Vswhere + L"\" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath");
+        std::string Install = RunCapture(L"\"" + Vswhere + L"\" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath", std::string(), std::wstring(), std::wstring(), 60000);
         while(!Install.empty() && strchr("\r\n ", Install.back())) { Install.pop_back(); }
         std::wstring Vcvars = Utf8ToWide(Install) + L"\\VC\\Auxiliary\\Build\\vcvars64.bat";
         if(Install.empty() || GetFileAttributesW(Vcvars.c_str()) == INVALID_FILE_ATTRIBUTES) { return; }
         // cmd /u writes `set`'s output as UTF-16.
-        std::string Raw = RunCapture(L"cmd.exe /d /u /c \"\"" + Vcvars + L"\" >nul 2>&1 && set\"");
+        std::string Raw = RunCapture(L"cmd.exe /d /u /c \"\"" + Vcvars + L"\" >nul 2>&1 && set\"", std::string(), std::wstring(), std::wstring(), 120000);
         std::wstring Text((const wchar_t*)Raw.data(), Raw.size() / sizeof(wchar_t));
         for(size_t At = 0; At < Text.size();)
         {
@@ -888,6 +918,200 @@ static void LaunchClientWindow(s32 JumpToTab)
     }
 }
 
+// --- the task view: what each claude is doing, from its transcript, and reports on its stops ---
+
+// A session's transcript, <ClaudeConfigDir>\projects\<project>\<id>.jsonl; empty when there's none.
+static std::wstring FindTranscript(const std::string& SessionId)
+{
+    std::wstring Projects = ClaudeConfigDir() + L"\\projects\\";
+    std::wstring Name = Utf8ToWide(SessionId) + L".jsonl";
+    WIN32_FIND_DATAW Found = {};
+    HANDLE Find = FindFirstFileW((Projects + L"*").c_str(), &Found);
+    std::wstring Out;
+    while(Find != INVALID_HANDLE_VALUE && Out.empty())
+    {
+        if((Found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && Found.cFileName[0] != L'.')
+        {
+            std::wstring Path = Projects + Found.cFileName + L"\\" + Name;
+            if(GetFileAttributesW(Path.c_str()) != INVALID_FILE_ATTRIBUTES) { Out = Path; }
+        }
+        if(!FindNextFileW(Find, &Found)) { break; }
+    }
+    if(Find != INVALID_HANDLE_VALUE) { FindClose(Find); }
+    return Out;
+}
+
+// What the end of a claude transcript says: the last prompt the user typed, the step under
+// way (its last tool call, else the text it's writing), and the text it wrote since whatever started
+// its turn (a prompt, a task notification): its report when it stops. Subagents' lines are skipped.
+struct transcript_look
+{
+    std::string Prompt;
+    std::string Step;
+    std::string Text;
+};
+
+static transcript_look LookAtTranscript(const std::wstring& Path)
+{
+    transcript_look L = {};
+    HANDLE File = CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+    if(File == INVALID_HANDLE_VALUE) { return L; }
+    LARGE_INTEGER Size = {};
+    GetFileSizeEx(File, &Size);
+    u64 Take = Size.QuadPart < (1 << 19) ? (u64)Size.QuadPart : (1 << 19); // the last 512 KB
+    std::string Tail = ReadFileRange(File, (u64)Size.QuadPart - Take, (u32)Take);
+    CloseHandle(File);
+    size_t At = (Take < (u64)Size.QuadPart) ? Tail.find('\n') + 1 : 0; // the first line is cut short
+    while(At < Tail.size())
+    {
+        size_t End = Tail.find('\n', At);
+        if(End == std::string::npos) { End = Tail.size(); }
+        std::string Line = Tail.substr(At, End - At);
+        At = End + 1;
+        if(Line.find("\"isSidechain\":true") != std::string::npos) { continue; }
+        std::string S;
+        if(Line.find("\"type\":\"user\"") != std::string::npos)
+        {
+            // Something that starts a turn (not a tool's result, not context Claude Code adds). What the
+            // user typed is the prompt; tagged text (a task notification, a slash command) isn't.
+            if(Line.find("\"tool_result\"") != std::string::npos || Line.find("\"isMeta\":true") != std::string::npos) { continue; }
+            L.Text.clear();
+            L.Step.clear();
+            bool32 Typed = JsonFindString(Line, "content", false, S) || JsonFindString(Line, "text", false, S);
+            if(Typed && !S.empty() && S[0] != '<') { L.Prompt = OneLine(S); }
+            continue;
+        }
+        if(Line.find("\"type\":\"assistant\"") == std::string::npos) { continue; }
+        if(Line.find("\"type\":\"tool_use\"") != std::string::npos)
+        {
+            std::string Name;
+            std::string Detail;
+            JsonFindString(Line, "name", false, Name);
+            static const char* Keys[] = {"description", "file_path", "command", "pattern", "url", "query", "prompt"};
+            for(const char* Key : Keys) { if(Detail.empty()) { JsonFindString(Line, Key, false, Detail); } }
+            L.Step = Name + (Detail.empty() ? std::string() : " \xC2\xB7 " + OneLine(Detail)); // ·
+        }
+        else if(Line.find("\"type\":\"text\"") != std::string::npos && JsonFindString(Line, "text", false, S))
+        {
+            L.Text += S + "\n";
+            L.Step = "writing \xC2\xB7 " + OneLine(S);
+        }
+    }
+    if(L.Text.size() > 6000)
+    {
+        size_t Cut = L.Text.size() - 6000;
+        while(Cut < L.Text.size() && ((u8)L.Text[Cut] & 0xC0) == 0x80) { Cut += 1; } // not inside a character
+        L.Text = L.Text.substr(Cut);
+    }
+    return L;
+}
+
+// The claude tabs' transcripts, looked at on their own thread every second while the task view is
+// open: Ids (and Paths where known) in, Paths (found) and Looks out, then Done and the loop's Wake.
+struct tasks_scan
+{
+    std::vector<std::string> Ids;
+    std::vector<std::wstring> Paths;
+    std::vector<transcript_look> Looks;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+static DWORD WINAPI TasksScanThread(void* Param)
+{
+    tasks_scan* S = (tasks_scan*)Param;
+    for(size_t I = 0; I < S->Ids.size(); ++I)
+    {
+        if(S->Paths[I].empty()) { S->Paths[I] = FindTranscript(S->Ids[I]); }
+        S->Looks.push_back(S->Paths[I].empty() ? transcript_look{} : LookAtTranscript(S->Paths[I]));
+    }
+    InterlockedExchange(&S->Done, 1);
+    SetEvent(S->Wake);
+    return 0;
+}
+
+// A report on a claude's stop, written on its own thread: what it wrote since its turn began, put
+// to a small model (`claude -p --model haiku`, no session kept) as a verdict and the one thing to
+// know. Id, Path (if known) and Claude (FindClaude) in; Report out (no Text: nothing to report).
+struct report_job
+{
+    std::string Id;
+    std::wstring Path;
+    std::wstring Claude;
+    task_report Report;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+static DWORD WINAPI ReportThread(void* Param)
+{
+    report_job* J = (report_job*)Param;
+    std::wstring Path = J->Path.empty() ? FindTranscript(J->Id) : J->Path;
+    transcript_look L = Path.empty() ? transcript_look{} : LookAtTranscript(Path);
+    std::string Said = OneLine(L.Text);
+    if(!Said.empty())
+    {
+        J->Report.Text = TruncateText(Said, 200); // if the model doesn't answer in shape: its own words
+        if(!J->Claude.empty())
+        {
+            std::string Ask =
+                "A coding agent (Claude Code) stopped and reported back to a developer who did not watch it work.\n\n"
+                "The developer's request: " + L.Prompt + "\n\n"
+                "The agent's report:\n" + L.Text + "\n\n"
+                "Judge only from the report whether the work that was asked for got done: success = done and it works; "
+                "mixed = partly done, or done with caveats or open problems; failed = not done, or broken; progress = the "
+                "report says more work follows. Don't judge wording or style. Names in the report (projects, tools, files) "
+                "are correct as written.\n\n"
+                "Reply with exactly one line: the verdict word, a colon, then at most 180 characters saying the single most "
+                "critical thing the developer needs to know (for success, the result in brief). If the agent asks the "
+                "developer something, say what it needs. No markdown, no quotes.";
+            // Without a parent session's markers, in %LOCALAPPDATA%\clod (no project's CLAUDE.md), no MCP servers,
+            // none of the user's settings (their hooks and plugins double the time it takes).
+            std::wstring Env;
+            wchar_t* Block = GetEnvironmentStringsW();
+            for(const wchar_t* Var = Block; *Var; Var += wcslen(Var) + 1)
+            {
+                const wchar_t* Eq = wcschr(Var + 1, L'=');
+                size_t NameLen = Eq ? (size_t)(Eq - Var) : wcslen(Var);
+                bool32 Drop = false;
+                for(const wchar_t* M : ClaudeMarkers) { if(wcslen(M) == NameLen && _wcsnicmp(Var, M, NameLen) == 0) { Drop = true; } }
+                if(!Drop) { Env.append(Var); Env.push_back(0); }
+            }
+            FreeEnvironmentStringsW(Block);
+            Env.push_back(0);
+            wchar_t Local[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"LOCALAPPDATA", Local, MAX_PATH);
+            std::wstring Dir = std::wstring(Local) + L"\\clod";
+            CreateDirectoryW(Dir.c_str(), 0);
+            std::string Out = RunCapture(J->Claude + L" -p --model haiku --no-session-persistence --strict-mcp-config --setting-sources project", Ask, Env, Dir, 90000);
+            // The first line that starts with a verdict and a colon.
+            static const char* Verdicts[] = {"success", "mixed", "failed", "progress"};
+            for(size_t At = 0; At < Out.size();)
+            {
+                size_t End = Out.find('\n', At);
+                if(End == std::string::npos) { End = Out.size(); }
+                std::string Line = OneLine(Out.substr(At, End - At));
+                At = End + 1;
+                for(s32 V = 0; V < 4; ++V)
+                {
+                    size_t Len = strlen(Verdicts[V]);
+                    if(ToLower(Line).compare(0, Len, Verdicts[V]) != 0 || Line.size() <= Len || Line[Len] != ':') { continue; }
+                    std::string Text = Line.substr(Len + 1);
+                    while(!Text.empty() && Text[0] == ' ') { Text.erase(0, 1); }
+                    if(Text.empty()) { continue; }
+                    J->Report.Verdict = VERDICT_SUCCESS + V;
+                    J->Report.Text = TruncateText(Text, 200);
+                    At = Out.size();
+                    break;
+                }
+            }
+        }
+    }
+    InterlockedExchange(&J->Done, 1);
+    SetEvent(J->Wake);
+    return 0;
+}
+
 static int ServerMain()
 {
     HANDLE Listen = IpcCreatePipe(true);
@@ -1064,6 +1288,10 @@ static int ServerMain()
     u64 CpuAtFt = 0;
     u64 SessionsScanMs = 0;     // last re-read of the Claude Code sessions (SessionsScanThread)
     sessions_scan* SessionsScan = 0;
+    u64 TasksScanMs = 0;        // last look at the claude tabs' transcripts (TasksScanThread, task view open)
+    tasks_scan* TasksScan = 0;
+    report_job* ReportJob = 0;  // a report being written (ReportThread), one at a time
+    std::vector<std::pair<std::string, u64>> ReportQueue; // sessions that stopped, and when to start their report
     u64 AppsScanMs = 0;         // last look at the tray apps' icons (AppsScanThread)
     apps_scan* AppsScan = 0;
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
@@ -1426,6 +1654,13 @@ static int ServerMain()
                 bool32 Busy = (First >= 0x25D0 && First <= 0x25D3); // ◐◑◒◓
                 if(T->TitleBusy && !Busy && First == 0x2733) { Why = "Claude finished"; } // ✳
                 if(Busy && !T->TitleBusy) { T->NeedsInput = false; } // a new turn: whatever it asked is settled
+                if(Busy != T->TitleBusy) { T->TurnSinceMs = NowMs; }
+                // Every stop gets a report for the task view, once its last words are in the transcript.
+                if(T->TitleBusy && !Busy && !T->SessionId.empty() && ReadSetting("task_summaries") != "off")
+                {
+                    ReportQueue.push_back({T->SessionId, NowMs + 2000});
+                    T->Summarizing = true;
+                }
                 T->TitleBusy = Busy;
                 if(T->Term.Bell)
                 {
@@ -1504,7 +1739,15 @@ static int ServerMain()
                 }
                 if(Find->Pid)
                 {
-                    if(Find->Id != T->SessionId) { T->SessionId = Find->Id; T->Title.clear(); Dirty = true; }
+                    if(Find->Id != T->SessionId)
+                    {
+                        T->SessionId = Find->Id;
+                        T->Title.clear();
+                        T->TranscriptPath.clear();
+                        T->TaskPrompt.clear();
+                        T->TaskStep.clear();
+                        Dirty = true;
+                    }
                     if(!Find->Cwd.empty() && Find->Cwd != T->Cwd) { T->Cwd = Find->Cwd; T->Project = ProjectName(Find->Cwd); Dirty = true; }
                     T->ClaudePid = Find->Pid;
                     T->LaunchedAtMs = 0;
@@ -1571,6 +1814,73 @@ static int ServerMain()
             HANDLE Thread = CreateThread(0, 0, SessionsScanThread, SessionsScan, 0, 0);
             if(Thread) { CloseHandle(Thread); }
             else { delete SessionsScan; SessionsScan = 0; }
+        }
+        // --- the task view: each claude's prompt and step from its transcript, every second while it's
+        // open (TasksScanThread) ---
+        if(TasksScan && TasksScan->Done)
+        {
+            for(size_t I = 0; I < TasksScan->Ids.size(); ++I)
+            {
+                for(tab* T : App.Tabs)
+                {
+                    if(T->SessionId != TasksScan->Ids[I]) { continue; }
+                    const transcript_look& L = TasksScan->Looks[I];
+                    if(L.Prompt != T->TaskPrompt || L.Step != T->TaskStep) { Dirty = true; }
+                    T->TranscriptPath = WideToUtf8(TasksScan->Paths[I]);
+                    T->TaskPrompt = L.Prompt;
+                    T->TaskStep = L.Step;
+                }
+            }
+            delete TasksScan;
+            TasksScan = 0;
+        }
+        if(!TasksScan && Attached && App.TasksOpen && NowMs - TasksScanMs >= 1000)
+        {
+            TasksScanMs = NowMs;
+            TasksScan = new tasks_scan();
+            TasksScan->Wake = Wake;
+            for(tab* T : App.Tabs)
+            {
+                if(T->SessionId.empty()) { continue; }
+                TasksScan->Ids.push_back(T->SessionId);
+                TasksScan->Paths.push_back(Utf8ToWide(T->TranscriptPath));
+            }
+            HANDLE Thread = CreateThread(0, 0, TasksScanThread, TasksScan, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete TasksScan; TasksScan = 0; }
+        }
+        // --- reports on the claudes' stops (ReportThread), one at a time, each a few seconds after its
+        // stop; they queue on the tab as unread ---
+        if(ReportJob && ReportJob->Done)
+        {
+            for(tab* T : App.Tabs)
+            {
+                if(T->SessionId != ReportJob->Id) { continue; }
+                bool32 More = false;
+                for(const std::pair<std::string, u64>& Q : ReportQueue) { More = More || Q.first == T->SessionId; }
+                T->Summarizing = More;
+                if(!ReportJob->Report.Text.empty())
+                {
+                    ReportJob->Report.AtMs = NowMs;
+                    T->Reports.push_back(ReportJob->Report);
+                    if(T->Reports.size() > 20) { T->Reports.erase(T->Reports.begin()); }
+                }
+                Dirty = true;
+            }
+            delete ReportJob;
+            ReportJob = 0;
+        }
+        if(!ReportJob && !ReportQueue.empty() && NowMs >= ReportQueue[0].second)
+        {
+            ReportJob = new report_job();
+            ReportJob->Id = ReportQueue[0].first;
+            ReportJob->Claude = FindClaude();
+            ReportJob->Wake = Wake;
+            for(tab* T : App.Tabs) { if(T->SessionId == ReportJob->Id) { ReportJob->Path = Utf8ToWide(T->TranscriptPath); } }
+            ReportQueue.erase(ReportQueue.begin());
+            HANDLE Thread = CreateThread(0, 0, ReportThread, ReportJob, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete ReportJob; ReportJob = 0; }
         }
         // --- tray apps with unread messages (AppsScanThread), every 2 s while a window is attached ---
         if(AppsScan && AppsScan->Done)
