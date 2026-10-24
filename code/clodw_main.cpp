@@ -422,11 +422,16 @@ static void Tick(clodw& C)
                 // Other tray apps' icons in the command bar: their glyphs are drawn again.
                 C.AppIcons = Icons;
                 C.G.Icons.clear();
+                C.G.TrayIcons.clear();
                 for(size_t Start = 0, End = 0; (End = Icons.find('\n', Start)) != std::string::npos; Start = End + 1)
                 {
-                    std::wstring Wide(End - Start + 1, 0);
-                    Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Icons.data() + Start, (int)(End - Start), &Wide[0], (int)Wide.size()));
+                    std::string Line = Icons.substr(Start, End - Start);
+                    size_t Tab = Line.find('\t');
+                    std::string Path = Line.substr(0, Tab);
+                    std::wstring Wide(Path.size() + 1, 0);
+                    Wide.resize(MultiByteToWideChar(CP_UTF8, 0, Path.data(), (int)Path.size(), &Wide[0], (int)Wide.size()));
                     C.G.Icons.push_back(Wide);
+                    C.G.TrayIcons.push_back(Tab == std::string::npos ? 0 : _strtoui64(Line.c_str() + Tab + 1, 0, 10));
                 }
                 GlyphCacheReset(C.G);
                 C.Dirty = true;

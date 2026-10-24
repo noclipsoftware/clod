@@ -205,7 +205,7 @@ static DWORD WINAPI AppsScanThread(void* Param)
             ReleaseDC(0, Dc);
             if(Info.hbmColor) { DeleteObject(Info.hbmColor); }
             if(Info.hbmMask) { DeleteObject(Info.hbmMask); }
-            if(Opaque && Colored * 20 >= Opaque) { Badged.push_back(tray_app{Exe, WideToUtf8(Path)}); }
+            if(Opaque && Colored * 20 >= Opaque) { Badged.push_back(tray_app{Exe, WideToUtf8(Path), (u64)Data.Icon}); }
         }
         if(Remote) { VirtualFreeEx(Explorer, Remote, 0, MEM_RELEASE); }
         if(Explorer) { CloseHandle(Explorer); }

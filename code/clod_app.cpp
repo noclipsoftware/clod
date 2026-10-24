@@ -67,7 +67,8 @@ struct bar_hit
 struct tray_app
 {
     std::string Name; // the exe's name without .exe ("Slack")
-    std::string Path; // the exe, UTF-8: clodw draws its icon, a click brings its window up
+    std::string Path; // the exe, UTF-8: a click brings its window up
+    u64 Icon;         // its tray icon (an HICON, readable from any process): clodw draws it in white
     bool operator==(const tray_app&) const = default;
 };
 
@@ -1319,7 +1320,7 @@ struct frame
     u32 PaneMouseTaken;          // bit per pane: clod or the program there handles the mouse, so a plain drag isn't a selection
     s32 ImagePane;               // pane + 1 whose image the window draws over the cells (WindowDrawsImages); 0 = none
     std::string ImagePath;
-    std::string AppIcons;        // exe paths, a newline after each: cell codepoint GLYPH_APP_ICON + k is the k-th's icon (clodw)
+    std::string AppIcons;        // a line per tray app, "<exe path>\t<tray HICON>": cell codepoint GLYPH_APP_ICON + k is the k-th's icon (clodw)
 };
 
 static cell Style(u32 Fg, u32 Bg, u16 Attr)
@@ -1573,14 +1574,14 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 if(App.WindowDrawsImages)
                 {
                     if(BX + 2 >= RightX || K >= 16) { break; }
-                    cell Icon = Style(Ui(UI_NOTE), CmdBar.Bg, 0);
+                    cell Icon = Style(Ui(UI_BRIGHT), CmdBar.Bg, 0);
                     Icon.Codepoint = GLYPH_APP_ICON + (u32)K;
                     Icon.Flags = CELL_WIDE;
                     F.Cells[(size_t)Y * W + BX] = Icon;
-                    cell Cont = Style(Ui(UI_NOTE), CmdBar.Bg, 0);
+                    cell Cont = Style(Ui(UI_BRIGHT), CmdBar.Bg, 0);
                     Cont.Flags = CELL_WIDE_CONT;
                     F.Cells[(size_t)Y * W + BX + 1] = Cont;
-                    F.AppIcons += A.Path + "\n";
+                    F.AppIcons += A.Path + "\t" + std::to_string(A.Icon) + "\n";
                     BX += 2;
                 }
                 else

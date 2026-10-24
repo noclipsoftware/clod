@@ -41,7 +41,8 @@ struct glyph_cache
     u32 TilesY;
     u32 NextX;
     u32 NextY;
-    std::vector<std::wstring> Icons; // exes whose icons GLYPH_APP_ICON + k draws
+    std::vector<std::wstring> Icons;  // exes whose icons GLYPH_APP_ICON + k draws (if TrayIcons' can't be read)
+    std::vector<u64> TrayIcons;       // their tray icons (HICON)
 };
 
 // Empties the cache (new font, or the atlas is full); glyphs get drawn again as they're needed.
@@ -195,22 +196,43 @@ static bool32 GlyphLookup(glyph_cache& G, font_state& F, renderer& R, const u32*
     // --- draw it with Direct2D, white on transparent, and copy its tiles into the atlas ---
     // A lone symbol asks for text presentation (U+FE0E), or fallback picks a color emoji. A glyph
     // wider than its cells (often from a fallback font) is scaled to fit.
-    // A tray app's icon (GLYPH_APP_ICON + k, in the command bar): the exe's own icon in its colors, a
-    // square a little under the cell height, centred in its cells.
+    // A tray app's icon (GLYPH_APP_ICON + k, in the command bar), as a mask tinted like text: its tray
+    // icon (a white logo on transparent; else the exe's icon), every pixel white with its brightness
+    // as coverage, so the colored badge turns white and its dark rim drops out. A square a little
+    // under the cell height, centred in its cells.
     if(Count == 1 && Cps[0] >= GLYPH_APP_ICON && Cps[0] - GLYPH_APP_ICON < (u32)G.Icons.size())
     {
+        u32 K = Cps[0] - GLYPH_APP_ICON;
         u32 Size = (u32)Max(1, (s32)(F.CellH * 0.85f));
-        HICON Icon = 0;
+        HICON Owned = 0;
         IWICImagingFactory* Wic = 0;
         IWICBitmap* Bitmap = 0;
         IWICFormatConverter* Converter = 0;
         ID2D1Bitmap* Image = 0;
-        bool32 Ok = SUCCEEDED(SHDefExtractIconW(G.Icons[Cps[0] - GLYPH_APP_ICON].c_str(), 0, 0, &Icon, 0, Size)) && Icon;
-        Ok = Ok && SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Wic)));
-        Ok = Ok && SUCCEEDED(Wic->CreateBitmapFromHICON(Icon, &Bitmap));
+        bool32 Ok = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Wic)));
+        bool32 FromTray = Ok && K < G.TrayIcons.size() && G.TrayIcons[K] && SUCCEEDED(Wic->CreateBitmapFromHICON((HICON)G.TrayIcons[K], &Bitmap));
+        if(Ok && !FromTray)
+        {
+            Ok = SUCCEEDED(SHDefExtractIconW(G.Icons[K].c_str(), 0, 0, &Owned, 0, Size)) && Owned;
+            Ok = Ok && SUCCEEDED(Wic->CreateBitmapFromHICON(Owned, &Bitmap));
+        }
         Ok = Ok && SUCCEEDED(Wic->CreateFormatConverter(&Converter));
-        Ok = Ok && SUCCEEDED(Converter->Initialize(Bitmap, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, 0, 0.0, WICBitmapPaletteTypeCustom));
-        Ok = Ok && SUCCEEDED(R.Draw2D->CreateBitmapFromWicBitmap(Converter, 0, &Image));
+        Ok = Ok && SUCCEEDED(Converter->Initialize(Bitmap, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, 0, 0.0, WICBitmapPaletteTypeCustom));
+        UINT IW = 0, IH = 0;
+        Ok = Ok && SUCCEEDED(Converter->GetSize(&IW, &IH)) && IW && IH && IW <= 256 && IH <= 256;
+        std::vector<u32> Px(Ok ? IW * IH : 0);
+        Ok = Ok && SUCCEEDED(Converter->CopyPixels(0, IW * 4, IW * IH * 4, (BYTE*)Px.data()));
+        if(Ok)
+        {
+            for(u32& P : Px)
+            {
+                u32 Bright = Max((s32)((P >> 16) & 255), Max((s32)((P >> 8) & 255), (s32)(P & 255)));
+                u32 A = (P >> 24) * Bright / 255;
+                P = A * 0x01010101u; // premultiplied white
+            }
+            D2D1_BITMAP_PROPERTIES Props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            Ok = SUCCEEDED(R.Draw2D->CreateBitmap(D2D1::SizeU(IW, IH), Px.data(), IW * 4, Props, &Image));
+        }
         R.Draw2D->BeginDraw();
         R.Draw2D->Clear(D2D1::ColorF(0, 0, 0, 0));
         if(Ok)
@@ -224,7 +246,7 @@ static bool32 GlyphLookup(glyph_cache& G, font_state& F, renderer& R, const u32*
         ReleaseCom(Converter);
         ReleaseCom(Bitmap);
         ReleaseCom(Wic);
-        if(Icon) { DestroyIcon(Icon); }
+        if(Owned) { DestroyIcon(Owned); }
         D3D11_BOX Src = {0, 0, 0, Cells * (UINT)F.CellW, (UINT)F.CellH, 1};
         R.Context->CopySubresourceRegion(R.Atlas, 0, X * F.CellW, Y * F.CellH, 0, R.Scratch, 0, &Src);
         glyph_entry& E = G.Table[Slot];
@@ -233,11 +255,11 @@ static bool32 GlyphLookup(glyph_cache& G, font_state& F, renderer& R, const u32*
         E.Style = Style;
         E.Cells = Cells;
         E.Tile = X | (Y << 16);
-        E.Color = true;
+        E.Color = false;
         E.Overflow = false;
         G.Used += 1;
         *Tile = E.Tile;
-        *Color = true;
+        *Color = false;
         *Overflow = false;
         return true;
     }
