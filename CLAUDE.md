@@ -216,18 +216,25 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   The selected card (`TaskSelected`; Alt+Up/Down, click) adds the bottom of its live screen beside
   an accent rule; every other key goes to that claude, so prompts are answered and it's talked to in
   its own input box. Alt+D or a click on the report dismisses it (the only way one is read).
+  A card that stops being one (its claude exited, its tab closed) leaves no selection: keys then
+  go nowhere ("Pick a session first") rather than to another claude. clod's keys that work anywhere
+  (pages, panes, layouts, Alt+\, Alt+digit, tab cycling) and clicks on the bars pass through;
+  `SwitchTab`, `FocusPane` and `GoToPage` close the view. The selected card's synchronized
+  updates (DEC 2026) hold frames, as the focused tab's do otherwise.
   - Prompt and step come from the transcript (`FindTranscript`: `projects\*\<id>.jsonl`, kept in
     `tab::TranscriptPath`; `LookAtTranscript` reads the last 512 KB): every second while the view is
     open (`TasksScanThread`).
   - Each busy-to-idle edge (claude stopping, at the end of a step or of the work) queues a report
-    (`ReportQueue`, 2 s later so its words are written; `task_summaries = off` in settings.txt stops
-    them). `ReportThread`, one at a time, puts the prompt and what claude wrote since its turn began
+    (`ReportQueue`, at most 40, started 2 s later so its words are written; `task_summaries = off` in
+    settings.txt stops them). Each reads the transcript only up to its stop (+2 s, by the lines'
+    timestamps), so a session that went on gets one report per step. `ReportThread`, one at a time,
+    puts the prompt (cut to 2000 characters) and what claude wrote since its turn began
     to `claude -p --model haiku --no-session-persistence --strict-mcp-config --setting-sources project`
     (stdin, `RunCapture`; in `%LOCALAPPDATA%\clod`, without `ClaudeMarkers`; ~5 s), asking for
     `success|mixed|failed|progress: <the one thing to know>`; into `tab::Reports` (unread, at most 20).
     A reply out of shape keeps claude's own first 200 characters, no verdict. Not kept across restarts.
-  - Verdict colors are `UI_GOOD`/`UI_BAD`, past `UI_COUNT`: clodw takes the theme's green and red,
-    console clients palette 2 and 1.
+    A card says "summarizing" while its session has a report queued or being written.
+  - Verdict marks: success in `Palette(2)`, failed in `Palette(1)` (themes recolor both).
 - Alt+\ (unless it's the prefix) goes round the tabs that want you, wherever they are, as one ring:
   claudes that need input (longest waiting first, `tab::WantsSinceMs`, set when it starts needing
   input or gets a notice), then tabs with a notice (longest first), then working claudes (tab

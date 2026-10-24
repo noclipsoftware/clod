@@ -316,10 +316,11 @@ static tab* UnshownTab(const app_state& App, s32 From, const tab* Skip)
     return 0;
 }
 
-// Focuses a pane of this page (and leaves the home screen, which covers the panes).
+// Focuses a pane of this page (and leaves the home screen or the task view, which cover the panes).
 static void FocusPane(app_state& App, s32 Pane)
 {
     App.HomeOpen = false;
+    App.TasksOpen = false;
     App.Focus = Clamp(Pane, 0, PaneCount(App.Layout) - 1);
     App.Active = TabIndex(App, App.PaneTab[App.Focus]);
     if(App.PaneTab[App.Focus]) { App.PaneTab[App.Focus]->Activity = false; App.PaneTab[App.Focus]->Notice.clear(); }
@@ -328,10 +329,12 @@ static void FocusPane(app_state& App, s32 Pane)
 static void GoToPage(app_state& App, s32 Index);
 
 // Goes to tab Index: the page and pane showing it come up with that pane focused, or, when no pane
-// shows it, it comes into the focused pane. Either way the home screen closes. Index 0 opens it.
+// shows it, it comes into the focused pane. Either way the home screen and the task view close.
+// Index 0 opens the home screen.
 static void SwitchTab(app_state& App, s32 Index)
 {
     if(Index < 0 || Index > (s32)App.Tabs.size()) { return; }
+    App.TasksOpen = false;
     if(Index == 0) { App.HomeOpen = true; return; }
     tab* T = App.Tabs[Index - 1];
     App.HomeOpen = false;
@@ -417,6 +420,7 @@ static void LoadPage(app_state& App, const page& G)
 static void GoToPage(app_state& App, s32 Index)
 {
     if(App.Pages.size() < 2) { return; }
+    App.TasksOpen = false;
     s32 Count = (s32)App.Pages.size();
     Index = ((Index % Count) + Count) % Count;
     page& Leaving = App.Pages[App.Page];
@@ -554,12 +558,23 @@ static std::vector<tab*> TaskTabs(const app_state& App)
     return Cards;
 }
 
-// The task view's selected card: the one picked last while it's still a card, else the first.
+// The task view's selected card, or null once the one picked is no card any more (its claude exited,
+// its tab closed): keys then go nowhere until another is picked, never to some other claude.
 static tab* TaskTab(const app_state& App)
 {
+    for(tab* T : TaskTabs(App)) { if(T == App.TaskSelected) { return T; } }
+    return 0;
+}
+
+// Opens the task view with Prefer's card selected when it's a claude, else the one picked before,
+// else the first.
+static void OpenTasks(app_state& App, tab* Prefer)
+{
+    App.HomeOpen = false;
+    App.TasksOpen = true;
     std::vector<tab*> Cards = TaskTabs(App);
-    for(tab* T : Cards) { if(T == App.TaskSelected) { return T; } }
-    return Cards.empty() ? 0 : Cards[0];
+    if(Prefer && !Prefer->SessionId.empty()) { App.TaskSelected = Prefer; }
+    else if(!TaskTab(App)) { App.TaskSelected = Cards.empty() ? 0 : Cards[0]; }
 }
 
 // "now", "4m", "2h", "3d": how long ago, for the task view.
@@ -989,21 +1004,33 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
 
         // --- the task view: clodw's Alt+Enter (KEY_TASKS) opens and closes it, so does home's l. It
-        // takes Alt+Up/Down (pick a card), Alt+D (dismiss the card's oldest report) and the mouse; every
-        // other key goes to the selected card's claude, so its prompts are answered and it's talked to
-        // in its own input box ---
+        // takes Alt+Up/Down (pick a card), Alt+D (dismiss the card's oldest report) and the mouse
+        // between the bars; every other key goes to the selected card's claude, so its prompts are
+        // answered and it's talked to in its own input box. clod's own keys that work anywhere (pages,
+        // panes, layouts, Alt+\, Alt+digit, tab cycling) and clicks on the bars still do their thing ---
         if(K.Kind == KEY_TASKS)
         {
-            App.TasksOpen = !App.TasksOpen;
-            if(App.TasksOpen) { App.HomeOpen = false; }
-            if(App.TasksOpen && Tab && !Tab->SessionId.empty()) { App.TaskSelected = Tab; }
+            if(App.TasksOpen) { App.TasksOpen = false; }
+            else { OpenTasks(App, Tab); }
             continue;
         }
-        if(App.TasksOpen)
+        bool32 Arrow = K.Kind == KEY_UP || K.Kind == KEY_RIGHT || K.Kind == KEY_LEFT || K.Kind == KEY_DOWN;
+        bool32 Block = K.Kind == KEY_INSERT || K.Kind == KEY_HOME || K.Kind == KEY_DELETE || K.Kind == KEY_END;
+        bool32 AltChar = K.Kind == KEY_CHAR && K.Mods == KMOD_ALT;
+        bool32 ClodKey = K.Kind == KEY_GO_PAGE || Cycling ||
+                         ((K.Kind == KEY_PGUP || K.Kind == KEY_PGDN) && K.Mods == KMOD_ALT) ||
+                         (Arrow && K.Mods == (KMOD_CTRL | KMOD_SHIFT | KMOD_ALT)) ||
+                         ((K.Kind == KEY_LEFT || K.Kind == KEY_RIGHT) && K.Mods == KMOD_ALT &&
+                          (App.Layout == LAYOUT_GRID || (App.Layout == LAYOUT_SIDE && K.Kind == KEY_RIGHT))) ||
+                         (Block && K.Mods == KMOD_ALT && App.Layout != LAYOUT_SINGLE) ||
+                         (AltChar && (K.Codepoint == 'q' || K.Codepoint == 'Q' || (K.Codepoint >= '0' && K.Codepoint <= '9') ||
+                                      (K.Codepoint == '\\' && App.PrefixKey != (PREFIX_ALT | '\\'))));
+        bool32 OnBars = K.Kind == KEY_MOUSE && (K.MouseY - 1 == 0 || K.MouseY - 1 > ContentRows(App.Height));
+        if(App.TasksOpen && !ClodKey && !OnBars)
         {
             std::vector<tab*> Cards = TaskTabs(App);
             tab* Card = TaskTab(App);
-            s32 CardAt = 0;
+            s32 CardAt = -1; // none picked: down starts at the first card, up at the last
             for(s32 I = 0; I < (s32)Cards.size(); ++I) { if(Cards[I] == Card) { CardAt = I; } }
             s32 Move = 0;
             if(K.Kind == KEY_MOUSE)
@@ -1026,14 +1053,23 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
             {
                 if(Card && !Card->Reports.empty()) { Card->Reports.erase(Card->Reports.begin()); }
             }
-            else if(Card && !Card->Exited)
+            else if(!Card)
+            {
+                App.Status = "Pick a session first: Alt+\xE2\x86\x91\xE2\x86\x93 or a click"; // ↑↓
+                App.StatusUntil = NowMs + 2000;
+            }
+            else if(!Card->Exited)
             {
                 Card->ScrollOffset = 0;
                 Card->NeedsInput = false; // answered
                 if(Card->Term.AppCursorKeys && Raw.size() == 3 && Raw[0] == 0x1B && Raw[1] == '[' && strchr("ABCDHF", Raw[2])) { Raw[1] = 'O'; }
                 WriteToTab(Cmds, Card, Raw);
             }
-            if(Move && !Cards.empty()) { App.TaskSelected = Cards[Clamp(CardAt + Move, 0, (s32)Cards.size() - 1)]; }
+            if(Move && !Cards.empty())
+            {
+                if(CardAt < 0) { CardAt = (Move > 0) ? -1 : (s32)Cards.size(); }
+                App.TaskSelected = Cards[Clamp(CardAt + Move, 0, (s32)Cards.size() - 1)];
+            }
             continue;
         }
         // Alt+Q / Alt+Shift+Q: focus the next / previous pane.
@@ -1045,7 +1081,6 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         }
         // Alt+arrows pick a pane. 2x2 grid: up = top left, right = top right, left = bottom left,
         // down = bottom right. Side by side: down = left, right = right. Other cases go to the program.
-        bool32 Arrow = K.Kind == KEY_UP || K.Kind == KEY_RIGHT || K.Kind == KEY_LEFT || K.Kind == KEY_DOWN;
         // Ctrl+Shift+Alt+arrows pick the layout: up = single, right = side by side, down = 2x2 grid,
         // left = main + 2.
         if(Arrow && K.Mods == (KMOD_CTRL | KMOD_SHIFT | KMOD_ALT))
@@ -1066,7 +1101,6 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
         // Alt+Insert/Home/Delete/End pick a pane the way those keys sit on a keyboard: Insert top left,
         // Home top right, Delete bottom left, End bottom right. Side by side: left / right column;
         // main + 2: Insert/Delete the main pane, Home and End the right two. A single pane: the program's.
-        bool32 Block = K.Kind == KEY_INSERT || K.Kind == KEY_HOME || K.Kind == KEY_DELETE || K.Kind == KEY_END;
         if(Block && K.Mods == KMOD_ALT && App.Layout != LAYOUT_SINGLE)
         {
             bool32 Right = (K.Kind == KEY_HOME || K.Kind == KEY_END);
@@ -1155,7 +1189,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                     {
                         if(H.Y != 0 || K.MouseX - 1 < H.X0 || K.MouseX - 1 >= H.X1) { continue; }
                         if(H.Pane <= -2) { GoToPage(App, -2 - H.Pane); }
-                        else if(H.Pane < 0) { App.HomeOpen = true; }
+                        else if(H.Pane < 0) { App.HomeOpen = true; App.TasksOpen = false; }
                         else { FocusPane(App, H.Pane); }
                     }
                 }
@@ -1321,12 +1355,7 @@ static void HandleInput(app_state& App, const std::string& In, u64 NowMs, std::v
                 else if(C == 'n') { NewSession(Cmds, HomeCwd(App)); }
                 else if(C == 'o') { OpenFolderPrompt(App, HomeCwd(App)); }
                 else if(C == 't') { app_command S = {}; S.Kind = CMD_OPEN_SHELL; S.Cwd = HomeCwd(App); Cmds.push_back(S); }
-                else if(C == 'l')
-                {
-                    App.HomeOpen = false;
-                    App.TasksOpen = true;
-                    if(SelectedTab && !SelectedTab->SessionId.empty()) { App.TaskSelected = SelectedTab; }
-                }
+                else if(C == 'l') { OpenTasks(App, SelectedTab); }
                 else if(C == 'P') { NewPage(App); }
                 else if(C == 'X') { ClosePage(App); }
                 else if(C == '[' || C == ']') { GoToPage(App, App.Page + (C == ']' ? 1 : -1)); }
@@ -1909,43 +1938,49 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 PutText(F, X0 + 1, Top + HOME_TOP, "No Claude Code sessions running.", Dim, Right);
                 continue;
             }
-            // A card's live rows: its screen's last non-blank row and up to 11 above it, leading blanks dropped.
-            auto LiveRows = [](const tab& T, s32* First) -> s32
+            // --- what each card takes, worked out once a frame: its report's rows (one, or two when the
+            // text doesn't fit beside "1/n ✓ 4m"), and for the selected card its live rows (its screen's
+            // last non-blank row and up to 11 above it, leading blanks dropped) ---
+            s32 LiveFirst = 0;
+            s32 LiveCount = 0;
+            if(Sel)
             {
-                const vt_terminal& V = T.Term;
+                const vt_terminal& V = Sel->Term;
                 const std::vector<cell>& Screen = V.Screens[V.AltActive ? 1 : 0];
-                auto Blank = [&](s32 Y) { for(s32 X = 0; X < V.Cols; ++X) { if(Screen[(size_t)Y * V.Cols + X].Codepoint > ' ') { return false; } } return true; };
                 s32 Last = V.Rows - 1;
-                while(Last >= 0 && Blank(Last)) { Last -= 1; }
-                if(Last < 0) { *First = 0; return 0; }
-                s32 Top = Max(0, Last - 11);
-                while(Top < Last && Blank(Top)) { Top += 1; }
-                *First = Top;
-                return Last - Top + 1;
-            };
-            // The report row's lead ("1/3 ✓ 4m  ") and how many rows the report takes.
-            auto ReportLead = [&](const tab& T) -> std::string { return std::to_string(1) + "/" + std::to_string(T.Reports.size()) + "   " + AgoText(NowMs - T.Reports[0].AtMs) + "  "; };
-            auto ReportRows = [&](const tab& T) -> s32
-            {
-                if(T.Reports.empty()) { return 0; }
-                return TextWidth(ReportLead(T)) + TextWidth(T.Reports[0].Text) <= TextW ? 1 : 2;
-            };
-            auto CardRows = [&](const tab& T) -> s32
-            {
                 s32 First = 0;
-                s32 Live = (&T == Sel) ? LiveRows(T, &First) : 0;
-                return 1 + !T.TaskPrompt.empty() + (T.TitleBusy && !T.TaskStep.empty()) + ReportRows(T) + Live + 1;
-            };
-            s32 SelAt = 0;
-            for(s32 I = 0; I < (s32)Cards.size(); ++I) { if(Cards[I] == Sel) { SelAt = I; } }
-            s32 Start = 0;
-            for(;;)
-            {
-                s32 Need = 0;
-                for(s32 I = Start; I <= SelAt; ++I) { Need += CardRows(*Cards[I]); }
-                if(Need <= Bottom - (Top + HOME_TOP) || Start >= SelAt) { break; }
-                Start += 1;
+                for(s32 Y = Last; Y >= 0; --Y)
+                {
+                    bool32 Blank = true;
+                    for(s32 X = 0; X < V.Cols && Blank; ++X) { Blank = Screen[(size_t)Y * V.Cols + X].Codepoint <= ' '; }
+                    if(Blank && Y == Last) { Last -= 1; continue; } // blank rows below the last text
+                    if(!Blank) { First = Y; }
+                    if(Y <= Last - 11) { break; }
+                }
+                if(Last >= 0)
+                {
+                    LiveFirst = First;
+                    LiveCount = Last - First + 1;
+                }
             }
+            std::vector<s32> ReportRows(Cards.size(), 0);
+            std::vector<s32> Heights(Cards.size(), 0);
+            s32 SelAt = 0;
+            for(s32 I = 0; I < (s32)Cards.size(); ++I)
+            {
+                const tab& T = *Cards[I];
+                if(!T.Reports.empty())
+                {
+                    s32 LeadW = TextWidth("1/" + std::to_string(T.Reports.size())) + 3 + TextWidth(AgoText(NowMs - T.Reports[0].AtMs)) + 2;
+                    ReportRows[I] = TextWidth(T.Reports[0].Text) <= Max(Right - (TextX + LeadW) - 1, 1) ? 1 : 2;
+                }
+                Heights[I] = 1 + !T.TaskPrompt.empty() + (T.TitleBusy && !T.TaskStep.empty()) + ReportRows[I] + (&T == Sel ? LiveCount : 0) + 1;
+                if(&T == Sel) { SelAt = I; }
+            }
+            // The first card drawn: the selected one and those above it fit.
+            s32 Start = SelAt;
+            for(s32 Need = Heights[SelAt]; Start > 0 && Need + Heights[Start - 1] <= Bottom - (Top + HOME_TOP); --Start) { Need += Heights[Start - 1]; }
+            if(!Sel) { Start = 0; }
 
             s32 Y = Top + HOME_TOP;
             for(s32 I = Start; I < (s32)Cards.size() && Y < Bottom; ++I)
@@ -1989,15 +2024,16 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
 
                 // --- its oldest unread report: 1/n, the verdict's mark, how long ago, then the text,
                 // wrapped once ---
-                s32 Rows = ReportRows(*T);
+                s32 Rows = ReportRows[I];
+                s32 ReportTop = Y;
                 if(Rows && Y < Bottom)
                 {
                     const task_report& Rep = T->Reports[0];
                     std::string VMark = "\xC2\xB7"; // · no verdict
                     cell VStyle = Dim;
-                    if(Rep.Verdict == VERDICT_SUCCESS) { VMark = "\xE2\x9C\x93"; VStyle = Style(Ui(UI_GOOD), 0, ATTR_BOLD); } // ✓
+                    if(Rep.Verdict == VERDICT_SUCCESS) { VMark = "\xE2\x9C\x93"; VStyle = Style(Palette(2), 0, ATTR_BOLD); } // ✓ in the theme's green
                     else if(Rep.Verdict == VERDICT_MIXED) { VMark = "~"; VStyle = Style(Ui(UI_NOTE), 0, ATTR_BOLD); }
-                    else if(Rep.Verdict == VERDICT_FAILED) { VMark = "\xE2\x9C\x97"; VStyle = Style(Ui(UI_BAD), 0, ATTR_BOLD); } // ✗
+                    else if(Rep.Verdict == VERDICT_FAILED) { VMark = "\xE2\x9C\x97"; VStyle = Style(Palette(1), 0, ATTR_BOLD); } // ✗ in its red
                     else if(Rep.Verdict == VERDICT_PROGRESS) { VMark = "\xE2\x80\xA6"; VStyle = Style(Ui(UI_BRIGHT), 0, 0); } // …
                     std::string Count = "1/" + std::to_string(T->Reports.size());
                     s32 RX = PutText(F, TextX, Y, Count, Dim, Right);
@@ -2025,17 +2061,10 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                         while(!Rest.empty() && Rest[0] == ' ') { Rest.erase(0, 1); }
                     }
                     PutText(F, RX, Y, First, cell{}, Right);
-                    bar_hit Hit = {0, W, 0, Y, 0, T, true};
-                    Hits.push_back(Hit);
                     Y += 1;
-                    if(Rows > 1 && Y < Bottom)
-                    {
-                        PutText(F, RX, Y, TruncateText(Rest, Room), cell{}, Right);
-                        bar_hit Hit2 = {0, W, 0, Y, 0, T, true};
-                        Hits.push_back(Hit2);
-                        Y += 1;
-                    }
+                    if(Rows > 1 && Y < Bottom) { PutText(F, RX, Y++, TruncateText(Rest, Room), cell{}, Right); }
                 }
+                s32 ReportEnd = Y;
 
                 // --- the selected card: the bottom of its live screen, a rule in the accent beside it
                 // (the keys go there), and its cursor ---
@@ -2043,10 +2072,9 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                 {
                     const vt_terminal& V = T->Term;
                     const std::vector<cell>& Screen = V.Screens[V.AltActive ? 1 : 0];
-                    s32 First = 0;
-                    s32 Live = LiveRows(*T, &First);
+                    s32 First = LiveFirst;
                     s32 N = Min(V.Cols, Right - TextX);
-                    for(s32 R = 0; R < Live && Y < Bottom; ++R, ++Y)
+                    for(s32 R = 0; R < LiveCount && Y < Bottom; ++R, ++Y)
                     {
                         PutText(F, X0 + 2, Y, "\xE2\x94\x82", Style(Ui(UI_ACCENT), 0, 0), Right); // │
                         if(N <= 0) { continue; }
@@ -2062,12 +2090,8 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
                         }
                     }
                 }
-                for(s32 R = CardTop; R < Y; ++R)
-                {
-                    bool32 HasHit = false;
-                    for(const bar_hit& Had : Hits) { HasHit = HasHit || (Had.Task && Had.Y == R); }
-                    if(!HasHit) { bar_hit RowHit = {0, W, 0, R, 0, T, false}; Hits.push_back(RowHit); }
-                }
+                // Every row of the card picks it; the report's rows dismiss the report.
+                for(s32 R = CardTop; R < Y; ++R) { Hits.push_back(bar_hit{0, W, 0, R, 0, T, R >= ReportTop && R < ReportEnd}); }
                 Y += 1; // a blank row between cards
             }
             continue;
@@ -2347,9 +2371,7 @@ static void Compose(const app_state& App, u64 NowMs, u64 NowFiletime, frame& F, 
 static void AppendColor(std::string& Out, u32 Color, bool32 Background)
 {
     char Buf[32];
-    if(Color == Ui(UI_GOOD)) { Color = Palette(2); } // the terminal's own green and red
-    else if(Color == Ui(UI_BAD)) { Color = Palette(1); }
-    else if(COLOR_TAG(Color) == COLOR_UI) { Color = UiDefault[Min((s32)(Color & 0xFF), UI_COUNT - 1)]; }
+    if(COLOR_TAG(Color) == COLOR_UI) { Color = UiDefault[Min((s32)(Color & 0xFF), UI_COUNT - 1)]; }
     u32 Tag = COLOR_TAG(Color);
     if(Tag == COLOR_PALETTE)
     {

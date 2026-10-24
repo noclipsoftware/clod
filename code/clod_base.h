@@ -46,9 +46,6 @@ enum ui_color
     UI_NOTE,          // status messages
     UI_LIVE,          // a session that's open in a tab
     UI_COUNT,
-    // Past UI_COUNT, so themes don't list them: clodw takes them from the theme's own palette.
-    UI_GOOD = UI_COUNT, // a task view verdict that went well (green)
-    UI_BAD,             // one that failed (red)
 };
 static u32 Ui(u32 Role) { return COLOR_UI | Role; }
 

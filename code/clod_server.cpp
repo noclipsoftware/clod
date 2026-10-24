@@ -509,7 +509,9 @@ static std::string RunCapture(std::wstring Cmd, const std::string& Input, const 
     HANDLE InRead = 0;
     HANDLE InWrite = 0;
     if(!CreatePipe(&Read, &Write, &Sa, 0)) { return std::string(); }
-    if(!CreatePipe(&InRead, &InWrite, &Sa, 1 << 16)) { CloseHandle(Read); CloseHandle(Write); return std::string(); }
+    // The stdin pipe holds all of Input, so writing it never waits on the child (the timeout below
+    // starts after).
+    if(!CreatePipe(&InRead, &InWrite, &Sa, (DWORD)Max((s32)Input.size() + 1, 1 << 16))) { CloseHandle(Read); CloseHandle(Write); return std::string(); }
     SetHandleInformation(Read, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(InWrite, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW Si = {};
@@ -941,9 +943,10 @@ static std::wstring FindTranscript(const std::string& SessionId)
     return Out;
 }
 
-// What the end of a claude transcript says: the last prompt the user typed, the step under
-// way (its last tool call, else the text it's writing), and the text it wrote since whatever started
-// its turn (a prompt, a task notification): its report when it stops. Subagents' lines are skipped.
+// What the end of a claude transcript says, as of UntilFt (a FILETIME; 0 = now): the last prompt the
+// user typed, the step under way (its last tool call, else the text it's writing), and the text it
+// wrote since whatever started its turn (a prompt, a task notification): its report when it stops.
+// Subagents' lines are skipped. The prompt is cut to 2000 characters (a pasted log can be huge).
 struct transcript_look
 {
     std::string Prompt;
@@ -951,7 +954,7 @@ struct transcript_look
     std::string Text;
 };
 
-static transcript_look LookAtTranscript(const std::wstring& Path)
+static transcript_look LookAtTranscript(const std::wstring& Path, u64 UntilFt)
 {
     transcript_look L = {};
     HANDLE File = CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
@@ -970,6 +973,15 @@ static transcript_look LookAtTranscript(const std::wstring& Path)
         At = End + 1;
         if(Line.find("\"isSidechain\":true") != std::string::npos) { continue; }
         std::string S;
+        // Lines are in time order: the first one after UntilFt ends the look ("2026-10-24T09:02:03.123Z").
+        SYSTEMTIME St = {};
+        FILETIME LineFt = {};
+        if(UntilFt && JsonFindString(Line, "timestamp", false, S) &&
+           sscanf_s(S.c_str(), "%hu-%hu-%huT%hu:%hu:%hu.%hu", &St.wYear, &St.wMonth, &St.wDay, &St.wHour, &St.wMinute, &St.wSecond, &St.wMilliseconds) >= 6 &&
+           SystemTimeToFileTime(&St, &LineFt) && (((u64)LineFt.dwHighDateTime << 32) | LineFt.dwLowDateTime) > UntilFt)
+        {
+            break;
+        }
         if(Line.find("\"type\":\"user\"") != std::string::npos)
         {
             // Something that starts a turn (not a tool's result, not context Claude Code adds). What the
@@ -978,7 +990,12 @@ static transcript_look LookAtTranscript(const std::wstring& Path)
             L.Text.clear();
             L.Step.clear();
             bool32 Typed = JsonFindString(Line, "content", false, S) || JsonFindString(Line, "text", false, S);
-            if(Typed && !S.empty() && S[0] != '<') { L.Prompt = OneLine(S); }
+            if(Typed && !S.empty() && S[0] != '<')
+            {
+                size_t Cut = (size_t)Min((s32)S.size(), 8000);
+                while(Cut < S.size() && ((u8)S[Cut] & 0xC0) == 0x80) { Cut += 1; } // not inside a character
+                L.Prompt = TruncateText(OneLine(S.substr(0, Cut)), 2000);
+            }
             continue;
         }
         if(Line.find("\"type\":\"assistant\"") == std::string::npos) { continue; }
@@ -1023,7 +1040,7 @@ static DWORD WINAPI TasksScanThread(void* Param)
     for(size_t I = 0; I < S->Ids.size(); ++I)
     {
         if(S->Paths[I].empty()) { S->Paths[I] = FindTranscript(S->Ids[I]); }
-        S->Looks.push_back(S->Paths[I].empty() ? transcript_look{} : LookAtTranscript(S->Paths[I]));
+        S->Looks.push_back(S->Paths[I].empty() ? transcript_look{} : LookAtTranscript(S->Paths[I], 0));
     }
     InterlockedExchange(&S->Done, 1);
     SetEvent(S->Wake);
@@ -1032,12 +1049,15 @@ static DWORD WINAPI TasksScanThread(void* Param)
 
 // A report on a claude's stop, written on its own thread: what it wrote since its turn began, put
 // to a small model (`claude -p --model haiku`, no session kept) as a verdict and the one thing to
-// know. Id, Path (if known) and Claude (FindClaude) in; Report out (no Text: nothing to report).
+// know. Id, Path (if known), Claude (FindClaude) and the stop's time in; Report out (no Text:
+// nothing to report). Only what the transcript held by the stop counts, so a session that went on
+// working gets a report on that step, not on what came after.
 struct report_job
 {
     std::string Id;
     std::wstring Path;
     std::wstring Claude;
+    u64 UntilFt;
     task_report Report;
     HANDLE Wake;
     volatile LONG Done;
@@ -1047,7 +1067,7 @@ static DWORD WINAPI ReportThread(void* Param)
 {
     report_job* J = (report_job*)Param;
     std::wstring Path = J->Path.empty() ? FindTranscript(J->Id) : J->Path;
-    transcript_look L = Path.empty() ? transcript_look{} : LookAtTranscript(Path);
+    transcript_look L = Path.empty() ? transcript_look{} : LookAtTranscript(Path, J->UntilFt);
     std::string Said = OneLine(L.Text);
     if(!Said.empty())
     {
@@ -1058,13 +1078,14 @@ static DWORD WINAPI ReportThread(void* Param)
                 "A coding agent (Claude Code) stopped and reported back to a developer who did not watch it work.\n\n"
                 "The developer's request: " + L.Prompt + "\n\n"
                 "The agent's report:\n" + L.Text + "\n\n"
-                "Judge only from the report whether the work that was asked for got done: success = done and it works; "
+                "Verdicts: success = what was asked is done (a direct answer that answers the question is success); "
                 "mixed = partly done, or done with caveats or open problems; failed = not done, or broken; progress = the "
-                "report says more work follows. Don't judge wording or style. Names in the report (projects, tools, files) "
-                "are correct as written.\n\n"
-                "Reply with exactly one line: the verdict word, a colon, then at most 180 characters saying the single most "
-                "critical thing the developer needs to know (for success, the result in brief). If the agent asks the "
-                "developer something, say what it needs. No markdown, no quotes.";
+                "report says what the agent will do next itself (it is partway through and continuing). Judge only whether "
+                "the request was met, not wording or style. Names in the report (projects, tools, files) are correct as "
+                "written.\n\n"
+                "Reply with exactly one line: the verdict word, a colon, then at most 180 characters for the developer: the "
+                "single most critical thing to know, or for success the result itself in brief (for example \"success: 4\"). "
+                "If the agent asks the developer something, say what it needs. No markdown, no quotes.";
             // Without a parent session's markers, in %LOCALAPPDATA%\clod (no project's CLAUDE.md), no MCP servers,
             // none of the user's settings (their hooks and plugins double the time it takes).
             std::wstring Env;
@@ -1291,7 +1312,11 @@ static int ServerMain()
     u64 TasksScanMs = 0;        // last look at the claude tabs' transcripts (TasksScanThread, task view open)
     tasks_scan* TasksScan = 0;
     report_job* ReportJob = 0;  // a report being written (ReportThread), one at a time
-    std::vector<std::pair<std::string, u64>> ReportQueue; // sessions that stopped, and when to start their report
+    // Stops waiting for their report: the session, when to start (its last words written by then),
+    // when it stopped (the report's age) and how far into the transcript the report reads (the stop,
+    // plus 2 s for those last words).
+    struct report_wait { std::string Id; u64 DueMs; u64 StopMs; u64 UntilFt; };
+    std::vector<report_wait> ReportQueue;
     u64 AppsScanMs = 0;         // last look at the tray apps' icons (AppsScanThread)
     apps_scan* AppsScan = 0;
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
@@ -1645,7 +1670,9 @@ static int ServerMain()
                     T->SeenCursorY = T->Term.CursorY;
                 }
                 else if(T->Term.ScrollbackPushed != T->SeenLinesPushed || T->Term.CursorY != T->SeenCursorY) { T->Activity = true; }
-                if(T == ActiveTab(App) && T->Term.SyncOutput && !WasSync) { SyncSinceMs = NowMs; }
+                // The tab on view: the task view's selected card shows live, else the focused pane's tab.
+                tab* Watched = App.TasksOpen ? TaskTab(App) : ActiveTab(App);
+                if(T == Watched && T->Term.SyncOutput && !WasSync) { SyncSinceMs = NowMs; }
                 Dirty = true;
 
                 // --- reasons to notify: bell, OSC 9/777, or claude's title spinner stopping ---
@@ -1658,8 +1685,10 @@ static int ServerMain()
                 // Every stop gets a report for the task view, once its last words are in the transcript.
                 if(T->TitleBusy && !Busy && !T->SessionId.empty() && ReadSetting("task_summaries") != "off")
                 {
-                    ReportQueue.push_back({T->SessionId, NowMs + 2000});
-                    T->Summarizing = true;
+                    FILETIME Ft = {};
+                    GetSystemTimeAsFileTime(&Ft);
+                    if(ReportQueue.size() >= 40) { ReportQueue.erase(ReportQueue.begin()); } // a long backlog drops its oldest
+                    ReportQueue.push_back(report_wait{T->SessionId, NowMs + 2000, NowMs, (((u64)Ft.dwHighDateTime << 32) | Ft.dwLowDateTime) + 20000000});
                 }
                 T->TitleBusy = Busy;
                 if(T->Term.Bell)
@@ -1855,25 +1884,20 @@ static int ServerMain()
         {
             for(tab* T : App.Tabs)
             {
-                if(T->SessionId != ReportJob->Id) { continue; }
-                bool32 More = false;
-                for(const std::pair<std::string, u64>& Q : ReportQueue) { More = More || Q.first == T->SessionId; }
-                T->Summarizing = More;
-                if(!ReportJob->Report.Text.empty())
-                {
-                    ReportJob->Report.AtMs = NowMs;
-                    T->Reports.push_back(ReportJob->Report);
-                    if(T->Reports.size() > 20) { T->Reports.erase(T->Reports.begin()); }
-                }
+                if(T->SessionId != ReportJob->Id || ReportJob->Report.Text.empty()) { continue; }
+                T->Reports.push_back(ReportJob->Report);
+                if(T->Reports.size() > 20) { T->Reports.erase(T->Reports.begin()); }
                 Dirty = true;
             }
             delete ReportJob;
             ReportJob = 0;
         }
-        if(!ReportJob && !ReportQueue.empty() && NowMs >= ReportQueue[0].second)
+        if(!ReportJob && !ReportQueue.empty() && NowMs >= ReportQueue[0].DueMs)
         {
             ReportJob = new report_job();
-            ReportJob->Id = ReportQueue[0].first;
+            ReportJob->Id = ReportQueue[0].Id;
+            ReportJob->Report.AtMs = ReportQueue[0].StopMs;
+            ReportJob->UntilFt = ReportQueue[0].UntilFt;
             ReportJob->Claude = FindClaude();
             ReportJob->Wake = Wake;
             for(tab* T : App.Tabs) { if(T->SessionId == ReportJob->Id) { ReportJob->Path = Utf8ToWide(T->TranscriptPath); } }
@@ -1881,6 +1905,14 @@ static int ServerMain()
             HANDLE Thread = CreateThread(0, 0, ReportThread, ReportJob, 0, 0);
             if(Thread) { CloseHandle(Thread); }
             else { delete ReportJob; ReportJob = 0; }
+        }
+        // A card says "summarizing" while its session has a report waiting or being written (whatever
+        // happened to the tab meanwhile: a new session id, a thread that didn't start).
+        for(tab* T : App.Tabs)
+        {
+            bool32 Waiting = !T->SessionId.empty() && ReportJob && ReportJob->Id == T->SessionId;
+            for(const report_wait& Q : ReportQueue) { Waiting = Waiting || (!T->SessionId.empty() && Q.Id == T->SessionId); }
+            if(Waiting != T->Summarizing) { T->Summarizing = Waiting; Dirty = true; }
         }
         // --- tray apps with unread messages (AppsScanThread), every 2 s while a window is attached ---
         if(AppsScan && AppsScan->Done)
@@ -1958,7 +1990,8 @@ static int ServerMain()
 
         // --- present to the attached window ---
         tab* Active = ActiveTab(App);
-        bool32 HoldForSync = Active && Active->Term.SyncOutput && NowMs - SyncSinceMs < 100;
+        tab* Watched = App.TasksOpen ? TaskTab(App) : Active; // whose synchronized update holds the frame
+        bool32 HoldForSync = Watched && Watched->Term.SyncOutput && NowMs - SyncSinceMs < 100;
         // At most one frame per 8 ms (a flood of output), but a frame after a quiet spell (an echo)
         // goes out at once; frames that changed nothing don't count.
         u64 NowUs = QpcUs();

@@ -155,9 +155,6 @@ static u32 PackHex(u32 Hex) { return PackRgb((Hex >> 16) & 255, (Hex >> 8) & 255
 // A cell color (clod_base.h tags) as a packed RGB in theme T; untagged = DefaultHex.
 static u32 ResolveColor(u32 C, u32 DefaultHex, const theme& T)
 {
-    // Good and bad (the task view's verdicts) are the theme's own green and red.
-    if(C == Ui(UI_GOOD)) { return PackHex(T.Ansi[2]); }
-    if(C == Ui(UI_BAD)) { return PackHex(T.Ansi[1]); }
     if(COLOR_TAG(C) == COLOR_RGB || COLOR_TAG(C) == COLOR_UI)
     {
         return PackHex(COLOR_TAG(C) == COLOR_RGB ? C & 0xFFFFFF : T.Ui[Min((s32)(C & 255), UI_COUNT - 1)]);
